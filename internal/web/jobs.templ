@@ -1,0 +1,198 @@
+package web
+
+import (
+	"strconv"
+
+	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/voices"
+)
+
+// statusClasses colors a queue row's badge from the palette's status meanings:
+// Teal is queued/information, Amber is work in progress, Green is ready, Burnt
+// is failed. Color is the second signal — the word always carries the meaning.
+func statusClasses(status string) string {
+	switch status {
+	case jobs.StatusReady:
+		return "bg-green/16 text-green border-green/45"
+	case jobs.StatusFailed:
+		return "bg-burnt/16 text-burnt border-burnt/45"
+	case jobs.StatusSubmitted, jobs.StatusInProgress:
+		return "bg-amber/16 text-amber border-amber/45"
+	default:
+		return "bg-teal/16 text-teal border-teal/45"
+	}
+}
+
+// statusLabel is the human wording for a job status.
+func statusLabel(status string) string {
+	switch status {
+	case jobs.StatusQueued:
+		return "Queued"
+	case jobs.StatusSubmitted:
+		return "Submitted"
+	case jobs.StatusInProgress:
+		return "Rendering"
+	case jobs.StatusReady:
+		return "Ready"
+	case jobs.StatusFailed:
+		return "Failed"
+	default:
+		return status
+	}
+}
+
+// excerpt trims a script down to a single scannable line.
+func excerpt(text string) string {
+	const limit = 110
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
+}
+
+// voiceLabel names the job's voice, tolerating one deleted after the job ran.
+func voiceLabel(j jobs.Job) string {
+	if j.VoiceName == "" {
+		return "Voice removed"
+	}
+	if j.VoiceKind == voices.KindCloned {
+		return j.VoiceName + " · cloned"
+	}
+	return j.VoiceName
+}
+
+// Queue is the swap target: the whole queue, returned by both GET /jobs and
+// POST /jobs so HTMX can refresh it in place. Its root carries id="queue".
+//
+// justQueued is the id of a job enqueued by the request being answered; it
+// drives the "queued" confirmation line and highlights the new row. Pass 0 when
+// nothing was just added.
+templ Queue(items []jobs.Job, justQueued int64) {
+	<div id="queue" class="flex flex-col gap-3">
+		if justQueued > 0 {
+			<p
+				role="status"
+				class="rounded-control border border-teal/45 bg-teal/16 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.07em] text-teal"
+			>
+				Enqueue succeeded — job { strconv.FormatInt(justQueued, 10) } queued
+			</p>
+		}
+		if len(items) == 0 {
+			<p class="rounded-container border border-line bg-surface-1 p-4 text-text-dim">
+				Nothing in the queue. Write a script and pick a voice to render one.
+			</p>
+		} else {
+			for _, j := range items {
+				@queueRow(j, j.ID == justQueued)
+			}
+		}
+	</div>
+}
+
+// queueRow is one job: status badge, voice, and the script excerpt. A failed
+// job also shows the recorded reason, which is the only place the user learns
+// that e.g. the endpoint rejected the credential.
+templ queueRow(j jobs.Job, fresh bool) {
+	<article
+		id={ "job-" + strconv.FormatInt(j.ID, 10) }
+		class={ "flex flex-col gap-2 rounded-container border bg-surface-1 p-4",
+			templ.KV("border-indigo", fresh), templ.KV("border-line", !fresh) }
+	>
+		<div class="flex items-start justify-between gap-3">
+			<div class="min-w-0">
+				<div class="font-display text-[15px] font-semibold tracking-[-0.015em] text-paper">
+					{ voiceLabel(j) }
+				</div>
+				<div class="mt-0.5 font-mono text-[11px] text-text-dim">
+					Job { strconv.FormatInt(j.ID, 10) }
+					if j.Language != "" {
+						{ " · " + j.Language }
+					}
+				</div>
+			</div>
+			<span class={ "inline-flex shrink-0 items-center rounded-full border px-2 py-[3px] font-mono text-[10.5px] uppercase tracking-[0.07em]", statusClasses(j.Status) }>
+				{ statusLabel(j.Status) }
+			</span>
+		</div>
+		<p class="text-text-dim">{ excerpt(j.Text) }</p>
+		if j.Status == jobs.StatusFailed && j.Error != "" {
+			<p class="font-mono text-[11px] text-burnt">{ j.Error }</p>
+		}
+	</article>
+}
+
+// QueuePage is a working page for the enqueue path: a compose form wired to
+// POST /jobs by HTMX, plus the queue itself. Deliberately plain — the real
+// composer (script editor, parameter sliders, transport) is built in the UI
+// goal against DESIGN.md.
+templ QueuePage(items []jobs.Job, available []voices.Voice) {
+	@Layout("Queue · Timbre") {
+		<main class="mx-auto max-w-3xl p-8">
+			<header class="mb-6">
+				<p class="font-mono text-[11px] uppercase tracking-[0.14em] text-text-dim">Render queue</p>
+				<h1 class="mt-1 font-display text-3xl font-extrabold tracking-[-0.02em] text-paper">Queue a render</h1>
+				<p class="mt-2 max-w-2xl text-text-dim">
+					Queued jobs are submitted to the synthesizer by a background worker — nothing
+					here waits on the render, so a long job never ties up the page.
+				</p>
+			</header>
+			@composeForm(available)
+			<section class="mt-6">
+				<h2 class="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-text-dim">Queue</h2>
+				@Queue(items, 0)
+			</section>
+		</main>
+	}
+}
+
+// composeForm posts to /jobs and swaps the returned queue fragment in place.
+templ composeForm(available []voices.Voice) {
+	<form
+		hx-post="/jobs"
+		hx-target="#queue"
+		hx-swap="outerHTML"
+		class="flex flex-col gap-3 rounded-container border border-line bg-surface-1 p-4"
+	>
+		<label class="flex flex-col gap-1">
+			<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Script</span>
+			<textarea
+				name="text"
+				rows="5"
+				required
+				maxlength={ strconv.Itoa(jobs.MaxTextRunes) }
+				placeholder="Paste the script to render…"
+				class="rounded-control border border-line bg-ink p-3 text-paper placeholder:text-text-dim"
+			></textarea>
+		</label>
+		<div class="flex flex-wrap gap-3">
+			<label class="flex flex-1 flex-col gap-1">
+				<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Voice</span>
+				<select
+					name="voice_id"
+					required
+					class="rounded-control border border-line bg-ink p-2 text-paper"
+				>
+					for _, v := range available {
+						<option value={ strconv.FormatInt(v.ID, 10) }>{ v.Name }</option>
+					}
+				</select>
+			</label>
+			<label class="flex flex-1 flex-col gap-1">
+				<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Language (optional)</span>
+				<input
+					type="text"
+					name="language"
+					placeholder="auto-detect"
+					class="rounded-control border border-line bg-ink p-2 text-paper placeholder:text-text-dim"
+				/>
+			</label>
+		</div>
+		<button
+			type="submit"
+			class="self-start cursor-pointer rounded-control bg-indigo px-4 py-2 font-display font-semibold text-paper"
+		>
+			Queue render
+		</button>
+	</form>
+}

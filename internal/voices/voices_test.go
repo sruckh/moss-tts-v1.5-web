@@ -151,8 +151,8 @@ func minimalWAV() []byte {
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(36+len(samples)))
 	buf.WriteString("WAVE")
 	buf.WriteString("fmt ")
-	_ = binary.Write(&buf, binary.LittleEndian, uint32(16))  // PCM fmt chunk size
-	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))   // PCM
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(16)) // PCM fmt chunk size
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(1))  // PCM
 	_ = binary.Write(&buf, binary.LittleEndian, uint16(channels))
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(sampleRate))
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(byteRate))

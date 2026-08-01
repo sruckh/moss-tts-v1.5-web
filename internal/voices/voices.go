@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // KindStock / KindCloned are the two voice provenances.
@@ -159,6 +160,56 @@ func (s *Store) ReferenceBytes(ctx context.Context, id int64) ([]byte, error) {
 		return nil, fmt.Errorf("read reference audio: %w", err)
 	}
 	return data, nil
+}
+
+// Get returns one voice by id.
+func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
+	var (
+		v   Voice
+		ref sql.Null[string]
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, kind, name, model, license_label, reference_path, created_at
+		FROM voices WHERE id = ?`, id).
+		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Voice{}, ErrNotFound
+	}
+	if err != nil {
+		return Voice{}, fmt.Errorf("get voice: %w", err)
+	}
+	v.ReferencePath = ref.V
+	return v, nil
+}
+
+// Reference returns the stored reference audio together with its container
+// format ("wav", "mp3", ...), which the RunPod handler needs as
+// reference_format: it decodes the base64 into a temp file using the format as
+// the filename suffix, so a mislabelled MP3 would reach the loader as a WAV.
+// Stock voices have no reference and return ErrNoReference.
+func (s *Store) Reference(ctx context.Context, id int64) (data []byte, format string, err error) {
+	var ref sql.Null[string]
+	err = s.db.QueryRowContext(ctx,
+		`SELECT reference_path FROM voices WHERE id = ?`, id).Scan(&ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("load reference path: %w", err)
+	}
+	if !ref.Valid || ref.V == "" {
+		return nil, "", ErrNoReference
+	}
+	data, err = os.ReadFile(s.absPath(ref.V))
+	if err != nil {
+		return nil, "", fmt.Errorf("read reference audio: %w", err)
+	}
+	// "refs/a1b2.wav" -> "wav". The extension was allowlist-validated on upload.
+	format = strings.TrimPrefix(filepath.Ext(ref.V), ".")
+	if format == "" {
+		format = "wav"
+	}
+	return data, format, nil
 }
 
 // writeReference writes src to audioDir/refs/<random>.ext and returns the

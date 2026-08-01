@@ -8,14 +8,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
+	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/server"
 	"github.com/sruckh/timbre/internal/voices"
+	"github.com/sruckh/timbre/internal/worker"
 )
 
 func main() {
@@ -76,9 +80,27 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("voice library ready", "stock_seed", "done")
 
+	jobStore := jobs.NewStore(handle)
+	runpodClient := runpod.New(cfg.RunPodEndpoint, cfg.RunPodAPIKey)
+
+	// The submission worker is the only caller of RunPod. It starts even when
+	// the endpoint or key is missing: queued jobs then fail with a recorded
+	// reason, which is far easier to diagnose than a queue that never moves.
+	if !runpodClient.Configured() {
+		log.Warn("RunPod endpoint or API key missing; queued jobs will fail until both are set")
+	}
+	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log)
+
+	var workerDone sync.WaitGroup
+	workerDone.Add(1)
+	go func() {
+		defer workerDone.Done()
+		submitter.Run(ctx)
+	}()
+
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(cfg, handle, authManager, voiceStore),
+		Handler:           server.New(cfg, handle, authManager, voiceStore, jobStore, runpodClient),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Generous but finite: every browser-facing request is sub-second,
 		// and uploads of reference audio are the only large bodies.
@@ -105,5 +127,11 @@ func run(log *slog.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return httpServer.Shutdown(shutdownCtx)
+	err = httpServer.Shutdown(shutdownCtx)
+
+	// ctx is already cancelled here, so the worker is on its way out; wait so a
+	// submission in flight finishes recording its outcome before the DB closes.
+	stop()
+	workerDone.Wait()
+	return err
 }

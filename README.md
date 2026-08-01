@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets, authenticates, and ships a voice library (reference upload + stock voices + cards). The render queue and playback are not written yet. [What works today](#what-works-today) is exact.
+> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + stock voices + cards), and queues renders: a background worker submits queued jobs to RunPod and stores the job id it gets back. Collecting the finished audio — polling, download, delete — and the studio UI are not written yet. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -34,10 +34,13 @@ Two consequences worth knowing before you read the code:
 | ✅ Multi-stage Docker build — templ + Tailwind + `go build`, no host toolchain | `docker compose` only |
 | ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*` requires auth | Done |
 | ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock-voice seed (Chatterbox · MIT, Qwen3-TTS · Apache-2.0, Higgs Audio v2 · Apache-2.0), `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
-| ⬜ Job queue, RunPod submission, polling, download, delete | Not started |
+| ✅ Job queue — authenticated `POST /jobs` inserts a `queued` row and returns the queue fragment; `GET /queue` and `GET /jobs` render it | Done |
+| ✅ RunPod submission worker — goroutine started at boot, drains queued jobs under `TIMBRE_MAX_IN_FLIGHT`, POSTs `/run`, stores the returned id, flips to `submitted`/`in_progress`. Submission is idempotent per job and never runs on a browser request | Done |
+| ✅ `GET /health` — session-gated probe of the RunPod endpoint's worker pool and queue depth | Done |
+| ⬜ Polling `/status/{id}`, audio capture, download, delete | Not started |
 | ⬜ The studio UI | Not started |
 
-The `jobs` table, the RunPod endpoint config and the voice library already exist; the worker that submits renders to RunPod does not.
+Renders get *to* RunPod; nothing brings the audio back yet. A submitted job stops at `submitted`/`in_progress` with its `runpod_id` recorded — the poller that turns that into a WAV on disk and flips the job to `ready` is the next piece.
 
 ## Quick start
 
@@ -80,7 +83,7 @@ Read from the environment at startup:
 | `TIMBRE_ADDR` | `:8080` | Listen address. Not published to the host. |
 | `TIMBRE_DB_PATH` | `/data/timbre.db` | SQLite file, on the volume Litestream shares. |
 | `TIMBRE_AUDIO_DIR` | `/data/audio` | Rendered WAVs and uploaded reference samples. |
-| `TIMBRE_SECURE_COOKIES` | — | Set `true` when served behind HTTPS so session cookies carry the `Secure` flag. (Replaces the removed `TIMBRE_PUBLIC_BASE_URL`; reference audio is sent base64-inline, not via a public URL.) |
+| `TIMBRE_SECURE_COOKIES` | — | Set `true` when served behind HTTPS so session cookies carry the `Secure` flag. It is an explicit opt-in rather than inferred from a public hostname, because reference audio goes to RunPod base64-inline and the app needs no public URL of its own. |
 | `RUNPOD_ENDPOINT` | — | Your endpoint, e.g. `https://api.runpod.ai/v2/your-endpoint-id`. Server-side only; never handed to the browser. |
 | `RUNPOD_API_KEY` | — | Injected by Infisical at container start. |
 | `ADMIN_USERNAME` | — | Seeds the first admin user on startup (only when the users table is empty). Injected by Infisical. |
@@ -121,9 +124,12 @@ cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
-internal/server/     chi router, login/logout, /healthz, /voices + upload, static assets, templ shell
+internal/server/     chi router, login/logout, /healthz + /health, /voices + upload, /queue + /jobs, static assets
 internal/voices/     voice library: stock-voice seed, reference upload, blob storage + read-back
-internal/web/        templ layout + login + voice library + Tailwind theme (compiled CSS is embedded)
+internal/jobs/       jobs table: enqueue + validation, claim/submit/fail state transitions
+internal/runpod/     the only RunPod client — POST /run, GET /health, permanent-vs-transient errors
+internal/worker/     background submission loop; the only caller of internal/runpod
+internal/web/        templ layout + login + voice library + queue + Tailwind theme (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 ```
@@ -133,6 +139,9 @@ scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 ## Notes
 
 - **Editor tooling.** `scripts/sync-generated.sh` copies `go.mod`, `go.sum`, `*_templ.go` and the compiled `app.css` out of the build image so `gopls` can resolve the tree. Generation still only happens in Docker. Re-run it after touching a `.templ` file, `input.css`, or imports.
+- **Two health routes, on purpose.** `/healthz` is public, unauthenticated and says nothing about RunPod — it is what the container `HEALTHCHECK` and NGINX Proxy Manager's upstream probe call, and container liveness must not depend on a third party or a RunPod outage would restart a healthy app. `/health` is the operator view: it needs a session, probes the endpoint, and returns `200` with `runpod.reachable: false` rather than a 5xx.
+- **Submitting twice is impossible, not merely unlikely.** `ClaimQueued` only hands out rows with a null `runpod_id`, and recording the id is a compare-and-set, so a duplicate submission can never overwrite the first. `jobs.runpod_id` carries a partial unique index as the last line of defence.
+- **A missing or rejected `RUNPOD_API_KEY` fails jobs; it does not hang them.** That case is classified permanent and fails on the first attempt with the reason on the row. Transient errors (429, 5xx, network) retry three times, counted in `jobs.attempts`, then fail.
 - **Streaming.** RunPod exposes `/stream/{id}`; Timbre targets the non-streaming path first. Streaming playback is secondary.
 
 ## License

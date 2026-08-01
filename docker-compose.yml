@@ -26,6 +26,9 @@ services:
       TIMBRE_SECURE_COOKIES: ${TIMBRE_SECURE_COOKIES:-false}
       # Server-side config, never a URL the browser is given.
       RUNPOD_ENDPOINT: ${RUNPOD_ENDPOINT:-}
+      # How many jobs the submission worker keeps at RunPod at once. Raising it
+      # buys parallel renders at the cost of more concurrent GPU workers.
+      TIMBRE_MAX_IN_FLIGHT: ${TIMBRE_MAX_IN_FLIGHT:-2}
       # Dev fallback for the three auth secrets. In deployment they come from
       # Infisical like RUNPOD_API_KEY — the entrypoint's `infisical run` puts
       # them straight into the app process's environment and these pass-throughs

@@ -15,6 +15,8 @@ import (
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
+	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/voices"
 )
 
@@ -50,7 +52,10 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("voices.SeedStock: %v", err)
 	}
 
-	return New(cfg, handle, mgr, voiceStore)
+	// No API key: nothing in the server tests may reach RunPod, and the /health
+	// probe reports it as unconfigured rather than dialling out.
+	return New(cfg, handle, mgr, voiceStore, jobs.NewStore(handle),
+		runpod.New(cfg.RunPodEndpoint, ""))
 }
 
 // login posts valid credentials and returns the issued session cookie.

@@ -6,9 +6,11 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
@@ -16,22 +18,37 @@ import (
 
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
+	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/voices"
 	"github.com/sruckh/timbre/internal/web"
 )
 
 // Server holds the dependencies shared by every handler.
 type Server struct {
-	cfg     config.Config
-	db      *sql.DB
-	auth    *auth.Manager
-	voices  *voices.Store
-	router  chi.Router
+	cfg    config.Config
+	db     *sql.DB
+	auth   *auth.Manager
+	voices *voices.Store
+	jobs   *jobs.Store
+	runpod *runpod.Client
+	router chi.Router
 }
 
-// New builds the router. The job queue lands in later goals.
-func New(cfg config.Config, database *sql.DB, authManager *auth.Manager, voiceStore *voices.Store) *Server {
-	srv := &Server{cfg: cfg, db: database, auth: authManager, voices: voiceStore, router: chi.NewRouter()}
+// New builds the router. runpodClient is used only to probe /health here — job
+// submission itself belongs to the background worker, never to a request.
+func New(cfg config.Config, database *sql.DB, authManager *auth.Manager,
+	voiceStore *voices.Store, jobStore *jobs.Store, runpodClient *runpod.Client) *Server {
+
+	srv := &Server{
+		cfg:    cfg,
+		db:     database,
+		auth:   authManager,
+		voices: voiceStore,
+		jobs:   jobStore,
+		runpod: runpodClient,
+		router: chi.NewRouter(),
+	}
 	srv.routes()
 	return srv
 }
@@ -51,8 +68,12 @@ func (s *Server) routes() {
 	s.router.Post("/logout", s.handleLogout)
 	s.router.Handle("/static/*", http.StripPrefix("/static/",
 		http.FileServer(http.FS(web.StaticFS()))))
+	s.router.Get("/health", s.handleRunPodHealth)
 	s.router.Get("/voices", s.handleVoiceLibrary)
 	s.router.Post("/voices/upload", s.handleVoiceUpload)
+	s.router.Get("/queue", s.handleQueuePage)
+	s.router.Get("/jobs", s.handleQueue)
+	s.router.Post("/jobs", s.handleCreateJob)
 	s.router.Get("/", templ.Handler(web.Shell()).ServeHTTP)
 }
 
@@ -67,4 +88,52 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// runPodHealthTimeout bounds the upstream probe so /health answers promptly
+// even when the endpoint is wedged.
+const runPodHealthTimeout = 5 * time.Second
+
+// handleRunPodHealth answers GET /health: the app plus a probe of the RunPod
+// endpoint's worker pool and queue depth.
+//
+// It sits behind the session gate, unlike /healthz. /healthz is what the
+// container HEALTHCHECK and NPM's upstream probe call, and container liveness
+// must not depend on a third party — a RunPod outage would otherwise restart a
+// perfectly healthy app. This route is the operator-facing view, and it costs
+// an upstream call, so it needs a login.
+func (s *Server) handleRunPodHealth(w http.ResponseWriter, r *http.Request) {
+	type runpodStatus struct {
+		Configured bool           `json:"configured"`
+		Reachable  bool           `json:"reachable"`
+		Error      string         `json:"error,omitempty"`
+		Detail     *runpod.Health `json:"detail,omitempty"`
+	}
+	body := struct {
+		OK     bool         `json:"ok"`
+		RunPod runpodStatus `json:"runpod"`
+	}{OK: true}
+
+	body.RunPod.Configured = s.runpod != nil && s.runpod.Configured()
+	switch {
+	case !body.RunPod.Configured:
+		body.RunPod.Error = "RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured"
+	default:
+		ctx, cancel := context.WithTimeout(r.Context(), runPodHealthTimeout)
+		defer cancel()
+
+		health, err := s.runpod.Health(ctx)
+		if err != nil {
+			body.RunPod.Error = err.Error()
+		} else {
+			body.RunPod.Reachable = true
+			body.RunPod.Detail = &health
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	// Still 200: the app is up. The runpod object carries the upstream verdict,
+	// so a monitor watching this route can distinguish the two failures.
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(body)
 }

@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	delay_ms    INTEGER,
 	exec_ms     INTEGER,
 	error       TEXT,
+	attempts    INTEGER NOT NULL DEFAULT 0,
 	created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
 	updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -108,6 +109,34 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 	}
 	if err := dropColumnIfPresent(ctx, handle, "voices", "reference_public_url"); err != nil {
 		return fmt.Errorf("migrate: drop reference_public_url: %w", err)
+	}
+	// jobs.attempts arrived with the submission worker; databases created before
+	// it need the column added rather than recreated.
+	if err := addColumnIfMissing(ctx, handle, "jobs", "attempts",
+		"INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: add jobs.attempts: %w", err)
+	}
+	return nil
+}
+
+// addColumnIfMissing adds column to table when it is absent, so an existing
+// database picks up a new field without a rebuild. CREATE TABLE IF NOT EXISTS
+// silently skips a table that already exists, which is why new columns need
+// this rather than an edit to the schema constant alone. table, column and
+// definition are compile-time constants here (never caller input), so
+// interpolating them into the DDL statement is safe.
+func addColumnIfMissing(ctx context.Context, handle *sql.DB, table, column, definition string) error {
+	var count int
+	if err := handle.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := handle.ExecContext(ctx,
+		fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
 }
