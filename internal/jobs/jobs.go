@@ -70,6 +70,12 @@ type Job struct {
 	// makes submission idempotent: a row that has one is never submitted again.
 	RunPodID string `json:"runpod_id,omitempty"`
 
+	AudioPath  string `json:"audio_path,omitempty"`
+	Format     string `json:"format,omitempty"`
+	SampleRate int    `json:"sample_rate,omitempty"`
+	DelayMS    int64  `json:"delay_ms,omitempty"`
+	ExecMS     int64  `json:"exec_ms,omitempty"`
+
 	// Error carries the last failure reason. On a non-terminal status it is a
 	// retryable error from an earlier attempt, not a verdict.
 	Error    string `json:"error,omitempty"`
@@ -124,7 +130,10 @@ const columns = `
 	SELECT j.id, j.user_id, j.status,
 	       COALESCE(j.voice_id, 0), COALESCE(v.name, ''), COALESCE(v.kind, ''),
 	       j.text, COALESCE(j.language, ''), COALESCE(j.params_json, ''),
-	       COALESCE(j.runpod_id, ''), COALESCE(j.error, ''), j.attempts,
+	       COALESCE(j.runpod_id, ''),
+	       COALESCE(j.audio_path, ''), COALESCE(j.format, ''), COALESCE(j.sample_rate, 0),
+	       COALESCE(j.delay_ms, 0), COALESCE(j.exec_ms, 0),
+	       COALESCE(j.error, ''), j.attempts,
 	       j.created_at, j.updated_at
 	FROM jobs j
 	LEFT JOIN voices v ON v.id = j.voice_id`
@@ -272,6 +281,18 @@ func (s *Store) MarkFailed(ctx context.Context, id int64, reason string) error {
 	return nil
 }
 
+// MarkPollerFailed records a terminal failure during status polling (when status is submitted or in_progress).
+func (s *Store) MarkPollerFailed(ctx context.Context, id int64, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'failed', error = ?, updated_at = datetime('now')
+		WHERE id = ? AND status IN ('submitted', 'in_progress')`, reason, id)
+	if err != nil {
+		return fmt.Errorf("mark poller job %d failed: %w", id, err)
+	}
+	return nil
+}
+
 // NoteAttempt records a retryable failure: the job stays queued and will be
 // picked up on a later tick, but the attempt is counted so the worker can give
 // up eventually rather than retrying forever.
@@ -284,6 +305,71 @@ func (s *Store) NoteAttempt(ctx context.Context, id int64, reason string) error 
 		return fmt.Errorf("note attempt on job %d: %w", id, err)
 	}
 	return nil
+}
+
+
+// ListPendingRunPod returns up to limit jobs that are in submitted or in_progress status
+// and have a RunPod async job ID.
+func (s *Store) ListPendingRunPod(ctx context.Context, limit int) ([]Job, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		columns+` WHERE j.status IN ('submitted', 'in_progress') AND j.runpod_id IS NOT NULL AND j.runpod_id != ''
+		          ORDER BY j.updated_at, j.id LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending runpod jobs: %w", err)
+	}
+	return scanJobs(rows)
+}
+
+// UpdateStatus sets the job's status (e.g. from submitted to in_progress).
+func (s *Store) UpdateStatus(ctx context.Context, id int64, status string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = ?, updated_at = datetime('now')
+		WHERE id = ? AND status != 'ready' AND status != 'failed'`, status, id)
+	if err != nil {
+		return fmt.Errorf("update job %d status: %w", id, err)
+	}
+	return nil
+}
+
+// MarkReady records completed render details and updates status to ready.
+func (s *Store) MarkReady(ctx context.Context, id int64, audioPath, format string, sampleRate int, delayMS, execMS int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'ready', audio_path = ?, format = ?, sample_rate = ?,
+		    delay_ms = ?, exec_ms = ?, error = NULL, updated_at = datetime('now')
+		WHERE id = ? AND status != 'ready'`, audioPath, format, sampleRate, delayMS, execMS, id)
+	if err != nil {
+		return fmt.Errorf("mark job %d ready: %w", id, err)
+	}
+	return nil
+}
+
+// Delete removes a job row by ID and returns the deleted Job (including its AudioPath).
+// If userID > 0, it enforces ownership.
+func (s *Store) Delete(ctx context.Context, id int64, userID int64) (Job, error) {
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		return Job{}, err
+	}
+	if userID > 0 && job.UserID != userID {
+		return Job{}, ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ? AND user_id = ?`, id, job.UserID)
+	if err != nil {
+		return Job{}, fmt.Errorf("delete job %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Job{}, fmt.Errorf("delete job %d: %w", id, err)
+	}
+	if affected == 0 {
+		return Job{}, ErrNotFound
+	}
+	return job, nil
 }
 
 // Params decodes the stored params_json. An empty or malformed value yields a
@@ -308,7 +394,10 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		if err := rows.Scan(&j.ID, &j.UserID, &j.Status,
 			&j.VoiceID, &j.VoiceName, &j.VoiceKind,
 			&j.Text, &j.Language, &j.ParamsJSON,
-			&j.RunPodID, &j.Error, &j.Attempts,
+			&j.RunPodID,
+			&j.AudioPath, &j.Format, &j.SampleRate,
+			&j.DelayMS, &j.ExecMS,
+			&j.Error, &j.Attempts,
 			&j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}

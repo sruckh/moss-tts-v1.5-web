@@ -90,12 +90,17 @@ func run(log *slog.Logger) error {
 		log.Warn("RunPod endpoint or API key missing; queued jobs will fail until both are set")
 	}
 	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log)
+	poller := worker.NewPoller(jobStore, runpodClient, cfg.AudioDir, log)
 
 	var workerDone sync.WaitGroup
-	workerDone.Add(1)
+	workerDone.Add(2)
 	go func() {
 		defer workerDone.Done()
 		submitter.Run(ctx)
+	}()
+	go func() {
+		defer workerDone.Done()
+		poller.Run(ctx)
 	}()
 
 	httpServer := &http.Server{

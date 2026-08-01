@@ -3,9 +3,13 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/sruckh/timbre/internal/jobs"
 	"github.com/sruckh/timbre/internal/voices"
@@ -160,4 +164,102 @@ func parseJobParams(r *http.Request) (map[string]any, error) {
 			strconv.Itoa(maxNewTokensCeiling))
 	}
 	return map[string]any{"max_new_tokens": tokens}, nil
+}
+
+
+// handleDownloadAudio answers GET /jobs/{id}/audio by streaming the saved WAV file.
+func (s *Server) handleDownloadAudio(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	job, err := s.jobs.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		serverError(w, r, err)
+		return
+	}
+	if job.UserID != userID {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	if job.Status != jobs.StatusReady || job.AudioPath == "" {
+		http.Error(w, "audio not ready", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := os.Stat(job.AudioPath); err != nil {
+		http.Error(w, "audio file missing", http.StatusNotFound)
+		return
+	}
+
+	ext := job.Format
+	if ext == "" {
+		ext = "wav"
+	}
+	contentType := "audio/" + ext
+	if ext == "wav" {
+		contentType = "audio/wav"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"job-%d.%s\"", job.ID, ext))
+	http.ServeFile(w, r, job.AudioPath)
+}
+
+// handleDeleteJob answers DELETE /jobs/{id} by removing the job from the DB
+// and removing its audio file if present.
+func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	deleted, err := s.jobs.Delete(r.Context(), id, userID)
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		serverError(w, r, err)
+		return
+	}
+
+	if deleted.AudioPath != "" {
+		_ = os.Remove(deleted.AudioPath)
+	}
+
+	if wantsJSON(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		return
+	}
+
+	items, err := s.jobs.ListForUser(r.Context(), userID, queueLimit)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	s.renderQueue(w, r, items, 0)
 }

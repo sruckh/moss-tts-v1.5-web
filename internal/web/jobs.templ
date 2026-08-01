@@ -69,7 +69,13 @@ func voiceLabel(j jobs.Job) string {
 // drives the "queued" confirmation line and highlights the new row. Pass 0 when
 // nothing was just added.
 templ Queue(items []jobs.Job, justQueued int64) {
-	<div id="queue" class="flex flex-col gap-3">
+	<div
+		id="queue"
+		hx-get="/jobs"
+		hx-trigger="every 2s"
+		hx-swap="outerHTML"
+		class="flex flex-col gap-3"
+	>
 		if justQueued > 0 {
 			<p
 				role="status"
@@ -119,6 +125,28 @@ templ queueRow(j jobs.Job, fresh bool) {
 		if j.Status == jobs.StatusFailed && j.Error != "" {
 			<p class="font-mono text-[11px] text-burnt">{ j.Error }</p>
 		}
+		<div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+			if j.Status == jobs.StatusReady {
+				<a
+					href={ "/jobs/" + strconv.FormatInt(j.ID, 10) + "/audio" }
+					download
+					class="inline-flex items-center gap-1.5 rounded-control border border-green/45 bg-green/16 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.07em] text-green hover:bg-green/24"
+				>
+					Download WAV
+				</a>
+			} else {
+				<div></div>
+			}
+			<button
+				type="button"
+				hx-delete={ "/jobs/" + strconv.FormatInt(j.ID, 10) }
+				hx-target="#queue"
+				hx-swap="outerHTML"
+				class="cursor-pointer rounded-control border border-burnt/45 bg-burnt/16 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.07em] text-burnt hover:bg-burnt/24"
+			>
+				Delete
+			</button>
+		</div>
 	</article>
 }
 

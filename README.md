@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + stock voices + cards), and queues renders: a background worker submits queued jobs to RunPod and stores the job id it gets back. Collecting the finished audio — polling, download, delete — and the studio UI are not written yet. [What works today](#what-works-today) is exact.
+> **Status: active.** The full backend lifecycle is complete and deployed — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + stock voices + cards), queues renders, submits out-of-band to RunPod, polls for status, decodes & saves completed WAV audio files, streams downloads, and handles job deletions. The full studio UI (Phase 6) is the final piece. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -37,10 +37,12 @@ Two consequences worth knowing before you read the code:
 | ✅ Job queue — authenticated `POST /jobs` inserts a `queued` row and returns the queue fragment; `GET /queue` and `GET /jobs` render it | Done |
 | ✅ RunPod submission worker — goroutine started at boot, drains queued jobs under `TIMBRE_MAX_IN_FLIGHT`, POSTs `/run`, stores the returned id, flips to `submitted`/`in_progress`. Submission is idempotent per job and never runs on a browser request | Done |
 | ✅ `GET /health` — session-gated probe of the RunPod endpoint's worker pool and queue depth | Done |
-| ⬜ Polling `/status/{id}`, audio capture, download, delete | Not started |
-| ⬜ The studio UI | Not started |
+| ✅ RunPod status poller & audio capture — polls `/status/{id}`, decodes `audio_base64` on `COMPLETED` to WAV, saves to storage volume (`/data/audio/renders/`), and updates job state to `ready` (or `failed`) | Done |
+| ✅ Audio download & job delete routes — authenticated `GET /jobs/{id}/audio` streams WAV file; `DELETE /jobs/{id}` removes DB row and audio file from volume | Done |
+| ✅ Queue status polling — HTMX `hx-trigger="every 2s"` auto-refreshes queue status in the browser | Done |
+| ⬜ The studio UI (Phase 6) | Next |
 
-Renders get *to* RunPod; nothing brings the audio back yet. A submitted job stops at `submitted`/`in_progress` with its `runpod_id` recorded — the poller that turns that into a WAV on disk and flips the job to `ready` is the next piece.
+The complete RunPod rendering lifecycle is functional: submission worker enqueues jobs, status poller checks `/status/{id}`, saves completed WAV audio files to the storage volume, and serves downloads or handles deletions cleanly.
 
 ## Quick start
 
@@ -124,11 +126,11 @@ cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
-internal/server/     chi router, login/logout, /healthz + /health, /voices + upload, /queue + /jobs, static assets
+internal/server/     chi router, login/logout, /healthz + /health, /voices + upload, /queue + /jobs + audio download & delete, static assets
 internal/voices/     voice library: stock-voice seed, reference upload, blob storage + read-back
-internal/jobs/       jobs table: enqueue + validation, claim/submit/fail state transitions
-internal/runpod/     the only RunPod client — POST /run, GET /health, permanent-vs-transient errors
-internal/worker/     background submission loop; the only caller of internal/runpod
+internal/jobs/       jobs table: enqueue + validation, claim/submit/fail state transitions, audio metadata & deletion
+internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, permanent-vs-transient errors
+internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
 internal/web/        templ layout + login + voice library + queue + Tailwind theme (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), sync-generated.sh (LSP support)

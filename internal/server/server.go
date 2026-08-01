@@ -74,6 +74,8 @@ func (s *Server) routes() {
 	s.router.Get("/queue", s.handleQueuePage)
 	s.router.Get("/jobs", s.handleQueue)
 	s.router.Post("/jobs", s.handleCreateJob)
+	s.router.Get("/jobs/{id}/audio", s.handleDownloadAudio)
+	s.router.Delete("/jobs/{id}", s.handleDeleteJob)
 	s.router.Get("/", templ.Handler(web.Shell()).ServeHTTP)
 }
 

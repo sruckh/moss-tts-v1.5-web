@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -300,5 +304,141 @@ func TestHealthzDoesNotDependOnRunPod(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "runpod") {
 		t.Error("/healthz leaks upstream state; that belongs on /health")
+	}
+}
+
+
+func TestDownloadAudioRoute(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voiceID := firstVoiceID(t, srv, cookie)
+	ctx := context.Background()
+
+	// 1. Enqueue job
+	id, err := srv.jobs.Enqueue(ctx, jobs.NewJob{
+		UserID:  1, // logged in user ID from test setup
+		VoiceID: voiceID,
+		Text:    "test audio download",
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// Unauthenticated GET /jobs/{id}/audio -> 401
+	req := httptest.NewRequest(http.MethodGet, "/jobs/"+strconv.FormatInt(id, 10)+"/audio", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated status = %d, want 401", rec.Code)
+	}
+
+	// Non-ready job GET /jobs/{id}/audio -> 400
+	req = httptest.NewRequest(http.MethodGet, "/jobs/"+strconv.FormatInt(id, 10)+"/audio", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("queued job status = %d, want 400", rec.Code)
+	}
+
+	// Create dummy audio file and mark ready
+	audioFile := filepath.Join(t.TempDir(), "test_job.wav")
+	dummyWav := []byte("RIFFxxxxWAVEfmt ")
+	if err := os.WriteFile(audioFile, dummyWav, 0o640); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := srv.jobs.MarkReady(ctx, id, audioFile, "wav", 24000, 10, 50); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+
+	// Authenticated GET /jobs/{id}/audio -> 200 + audio/wav + attachment + bytes
+	req = httptest.NewRequest(http.MethodGet, "/jobs/"+strconv.FormatInt(id, 10)+"/audio", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ready job status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "audio/wav") {
+		t.Errorf("Content-Type = %q, want audio/wav...", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want attachment", cd)
+	}
+	if string(rec.Body.Bytes()) != string(dummyWav) {
+		t.Errorf("body = %q, want %q", rec.Body.String(), dummyWav)
+	}
+}
+
+func TestDeleteJobRoute(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voiceID := firstVoiceID(t, srv, cookie)
+	ctx := context.Background()
+
+	// 1. Delete queued job
+	queuedID, err := srv.jobs.Enqueue(ctx, jobs.NewJob{
+		UserID:  1,
+		VoiceID: voiceID,
+		Text:    "queued to delete",
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/jobs/"+strconv.FormatInt(queuedID, 10), nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete queued status = %d, want 200", rec.Code)
+	}
+
+	// Verify job is removed from DB
+	if _, err := srv.jobs.Get(ctx, queuedID); !errors.Is(err, jobs.ErrNotFound) {
+		t.Errorf("Get queued job after delete err = %v, want ErrNotFound", err)
+	}
+
+	// 2. Delete ready job with audio file
+	readyID, err := srv.jobs.Enqueue(ctx, jobs.NewJob{
+		UserID:  1,
+		VoiceID: voiceID,
+		Text:    "ready to delete",
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	audioFile := filepath.Join(t.TempDir(), "ready_delete.wav")
+	if err := os.WriteFile(audioFile, []byte("data"), 0o640); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := srv.jobs.MarkReady(ctx, readyID, audioFile, "wav", 24000, 10, 50); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/jobs/"+strconv.FormatInt(readyID, 10), nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete ready status = %d, want 200", rec.Code)
+	}
+
+	// Verify DB row deleted
+	if _, err := srv.jobs.Get(ctx, readyID); !errors.Is(err, jobs.ErrNotFound) {
+		t.Errorf("Get ready job after delete err = %v, want ErrNotFound", err)
+	}
+
+	// Verify audio file deleted from disk
+	if _, err := os.Stat(audioFile); !os.IsNotExist(err) {
+		t.Errorf("audio file %s still exists after DELETE", audioFile)
 	}
 }

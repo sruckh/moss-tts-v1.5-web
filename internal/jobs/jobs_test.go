@@ -330,3 +330,100 @@ func TestParamsToleratesGarbage(t *testing.T) {
 		t.Errorf("Params() = %v, want nil for empty JSON", got)
 	}
 }
+
+
+func TestPollerAndDeleteStoreOperations(t *testing.T) {
+	store, userID, voiceID := newTestStore(t)
+	ctx := context.Background()
+
+	// 1. Enqueue job
+	id, err := store.Enqueue(ctx, NewJob{UserID: userID, VoiceID: voiceID, Text: "test poller"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	// 2. MarkSubmitted
+	if _, err := store.MarkSubmitted(ctx, id, "runpod-100", StatusSubmitted); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+
+	// 3. ListPendingRunPod
+	pending, err := store.ListPendingRunPod(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingRunPod: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != id {
+		t.Fatalf("ListPendingRunPod returned %v, want job %d", pending, id)
+	}
+
+	// 4. UpdateStatus to in_progress
+	if err := store.UpdateStatus(ctx, id, StatusInProgress); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	got, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusInProgress {
+		t.Errorf("Status = %q, want %s", got.Status, StatusInProgress)
+	}
+
+	// 5. MarkReady
+	if err := store.MarkReady(ctx, id, "/data/audio/renders/job_1.wav", "wav", 24000, 100, 500); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+	got, err = store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusReady {
+		t.Errorf("Status = %q, want ready", got.Status)
+	}
+	if got.AudioPath != "/data/audio/renders/job_1.wav" {
+		t.Errorf("AudioPath = %q, want /data/audio/renders/job_1.wav", got.AudioPath)
+	}
+	if got.Format != "wav" || got.SampleRate != 24000 || got.DelayMS != 100 || got.ExecMS != 500 {
+		t.Errorf("Details = %s/%d/%d/%d, want wav/24000/100/500", got.Format, got.SampleRate, got.DelayMS, got.ExecMS)
+	}
+
+	// 6. Delete
+	deleted, err := store.Delete(ctx, id, userID)
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if deleted.ID != id || deleted.AudioPath != "/data/audio/renders/job_1.wav" {
+		t.Errorf("deleted = %v, want job %d with AudioPath", deleted, id)
+	}
+
+	// 7. Get after Delete returns ErrNotFound
+	if _, err := store.Get(ctx, id); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get after Delete err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMarkPollerFailed(t *testing.T) {
+	store, userID, voiceID := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Enqueue(ctx, NewJob{UserID: userID, VoiceID: voiceID, Text: "hi"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := store.MarkSubmitted(ctx, id, "runpod-101", StatusSubmitted); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+	if err := store.MarkPollerFailed(ctx, id, "RunPod error"); err != nil {
+		t.Fatalf("MarkPollerFailed: %v", err)
+	}
+
+	got, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusFailed {
+		t.Errorf("Status = %q, want %s", got.Status, StatusFailed)
+	}
+	if got.Error != "RunPod error" {
+		t.Errorf("Error = %q, want 'RunPod error'", got.Error)
+	}
+}

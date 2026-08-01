@@ -238,6 +238,42 @@ func TestHealthProbesEndpoint(t *testing.T) {
 	}
 }
 
+
+func TestStatusQueriesEndpoint(t *testing.T) {
+	var (
+		gotPath string
+		gotAuth string
+	)
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"job-99","status":"COMPLETED","delayTime":100,"executionTime":500,"output":{"audio_base64":"QUJD","format":"wav","sample_rate":24000}}`)
+	}))
+	defer double.Close()
+
+	client := New(double.URL, "k", WithHTTPClient(double.Client()))
+	got, err := client.Status(context.Background(), "job-99")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if gotPath != "/status/job-99" {
+		t.Errorf("path = %q, want /status/job-99", gotPath)
+	}
+	if gotAuth != "Bearer k" {
+		t.Errorf("auth = %q, want Bearer k", gotAuth)
+	}
+	if got.Status != StatusCompleted {
+		t.Errorf("status = %q, want %s", got.Status, StatusCompleted)
+	}
+	if got.Output.AudioBase64 != "QUJD" {
+		t.Errorf("audio_base64 = %q, want QUJD", got.Output.AudioBase64)
+	}
+	if got.DelayTime != 100 || got.ExecutionTime != 500 {
+		t.Errorf("delay/exec = %d/%d, want 100/500", got.DelayTime, got.ExecutionTime)
+	}
+}
+
 func TestConfigured(t *testing.T) {
 	if New("", "").Configured() {
 		t.Error("empty client reported configured")

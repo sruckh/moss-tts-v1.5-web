@@ -222,6 +222,56 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 	return out, nil
 }
 
+
+// StatusResult is the response to GET /status/{id}.
+type StatusResult struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	DelayTime     int64  `json:"delayTime,omitempty"`
+	ExecutionTime int64  `json:"executionTime,omitempty"`
+	Output        Output `json:"output,omitempty"`
+	Error         any    `json:"error,omitempty"`
+}
+
+// Output is the nested output object in a RunPod status response.
+type Output struct {
+	Status           string `json:"status,omitempty"`
+	AudioBase64      string `json:"audio_base64,omitempty"`
+	Format           string `json:"format,omitempty"`
+	SampleRate       int    `json:"sample_rate,omitempty"`
+	DetectedLanguage string `json:"detected_language,omitempty"`
+}
+
+// ErrorString formats Error into a string regardless of whether it was returned
+// as a string or an object.
+func (sr StatusResult) ErrorString() string {
+	if sr.Error == nil {
+		return ""
+	}
+	switch v := sr.Error.(type) {
+	case string:
+		return v
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(b)
+	}
+}
+
+// Status queries GET /status/{id} for the progress or completion of an async job.
+func (c *Client) Status(ctx context.Context, id string) (StatusResult, error) {
+	if id == "" {
+		return StatusResult{}, errors.New("runpod: empty job id")
+	}
+	var out StatusResult
+	if err := c.do(ctx, http.MethodGet, "/status/"+id, nil, &out); err != nil {
+		return StatusResult{}, err
+	}
+	return out, nil
+}
+
 // do issues one request and decodes a JSON response into out.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
 	if c.baseURL == "" {
