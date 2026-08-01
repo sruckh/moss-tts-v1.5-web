@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: early.** The runnable skeleton is built and deployed — it serves, migrates, replicates and injects secrets. The studio features (auth, voice library, queue, playback) are not written yet. [What works today](#what-works-today) is exact.
+> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets and authenticates. The studio features (voice library, queue, playback) are not written yet. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -28,11 +28,11 @@ Two consequences worth knowing before you read the code:
 | | |
 | --- | --- |
 | ✅ HTTP server, `GET /healthz` → `{"ok":true}`, embedded static assets | Serving |
-| ✅ SQLite schema — `users`, `voices`, `jobs` with constraints and indexes | Migrated on boot |
+| ✅ SQLite schema — `users`, `voices`, `jobs`, `sessions` with constraints and indexes | Migrated on boot |
 | ✅ Litestream sidecar replicating to an S3-compatible bucket | Continuous |
 | ✅ Secrets injected from Infisical at container start | No secrets in the repo |
 | ✅ Multi-stage Docker build — templ + Tailwind + `go build`, no host toolchain | `docker compose` only |
-| ⬜ Login, session, gated routes | Not started |
+| ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*`, `/refs/*` requires auth | Done |
 | ⬜ Reference upload, public reference route, voice library | Not started |
 | ⬜ Job queue, RunPod submission, polling, download, delete | Not started |
 | ⬜ The studio UI | Not started |
@@ -59,6 +59,8 @@ docker compose exec app wget -qO- http://localhost:8080/healthz
 # => {"ok":true}
 ```
 
+On first boot the app seeds the admin user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (injected by Infisical, or `.env` when running without it) and logs `admin user created` — never the password. Every page except `/login`, `/healthz`, `/static/*` and `/refs/*` then redirects to `/login` until you sign in.
+
 Run the tests:
 
 ```bash
@@ -81,9 +83,12 @@ Read from the environment at startup:
 | `TIMBRE_PUBLIC_BASE_URL` | — | Public hostname, e.g. `https://timbre.example.com`. Reference URLs are built from it, so it must be the externally reachable name. |
 | `RUNPOD_ENDPOINT` | — | Your endpoint, e.g. `https://api.runpod.ai/v2/your-endpoint-id`. Server-side only; never handed to the browser. |
 | `RUNPOD_API_KEY` | — | Injected by Infisical at container start. |
+| `ADMIN_USERNAME` | — | Seeds the first admin user on startup (only when the users table is empty). Injected by Infisical. |
+| `ADMIN_PASSWORD` | — | Password for that bootstrap admin, bcrypt-hashed at rest. Injected by Infisical. |
+| `TIMBRE_SESSION_SECRET` | — | Keys the HMAC that signs session cookies. Injected by Infisical; if unset, sessions are forgotten on restart. |
 | `TIMBRE_MAX_IN_FLIGHT` | `2` | How many jobs the worker keeps submitted at once. |
 
-`RUNPOD_API_KEY` and the replication credentials come from [Infisical](https://infisical.com) via the container entrypoint, which trades a Universal Auth machine identity for a short-lived token and runs the app under `infisical run`. Nothing is baked into an image layer.
+`RUNPOD_API_KEY`, the three auth secrets above and the replication credentials come from [Infisical](https://infisical.com) via the container entrypoint, which trades a Universal Auth machine identity for a short-lived token and runs the app under `infisical run`. Nothing is baked into an image layer.
 
 One consequence that costs people an afternoon: `infisical run` injects into the **app process**, not the container. A fresh `docker compose exec` shell will not see `RUNPOD_API_KEY` even when injection worked. Check the process instead:
 
@@ -115,8 +120,9 @@ The build compiles `internal/web/input.css` to `app.css` with the Tailwind v4 CL
 cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
-internal/server/     chi router, /healthz, static assets, templ shell
-internal/web/        templ layout + Tailwind theme (compiled CSS is embedded)
+internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
+internal/server/     chi router, login/logout, /healthz, static assets, templ shell
+internal/web/        templ layout + login page + Tailwind theme (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 ```

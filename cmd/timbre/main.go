@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
 	"github.com/sruckh/timbre/internal/server"
@@ -55,9 +56,22 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	authManager, ephemeralKey, err := auth.NewManager(handle,
+		[]byte(cfg.SessionSecret), cfg.SecureCookies())
+	if err != nil {
+		return err
+	}
+	if ephemeralKey {
+		log.Warn("TIMBRE_SESSION_SECRET unset; generated an ephemeral key — " +
+			"sessions will not survive restarts")
+	}
+	if err := authManager.Bootstrap(ctx, log, cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		return err
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(cfg, handle),
+		Handler:           server.New(cfg, handle, authManager),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Generous but finite: every browser-facing request is sub-second,
 		// and uploads of reference audio are the only large bodies.

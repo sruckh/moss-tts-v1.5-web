@@ -25,6 +25,13 @@ services:
       TIMBRE_PUBLIC_BASE_URL: ${TIMBRE_PUBLIC_BASE_URL:-}
       # Server-side config, never a URL the browser is given.
       RUNPOD_ENDPOINT: ${RUNPOD_ENDPOINT:-}
+      # Dev fallback for the three auth secrets. In deployment they come from
+      # Infisical like RUNPOD_API_KEY — the entrypoint's `infisical run` puts
+      # them straight into the app process's environment and these pass-throughs
+      # stay empty. Set them in .env only when running without Infisical.
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      TIMBRE_SESSION_SECRET: ${TIMBRE_SESSION_SECRET:-}
       # Universal Auth machine identity — the entrypoint trades these for a
       # short-lived token and runs the app under `infisical run`, which is what
       # puts RUNPOD_API_KEY in the environment. Export them into your shell

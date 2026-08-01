@@ -1,0 +1,67 @@
+package web
+
+// Login is the gated app's front door: a single centered card on the ink
+// canvas. It posts as a plain form (no JS required); the handlers answer 200
+// with LoginSuccess on good credentials and re-render this page with an error
+// on bad ones.
+templ Login(errMsg string) {
+	@Layout("Sign in · Timbre") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
+				<h1 class="font-display text-3xl font-extrabold text-paper">Timbre</h1>
+				<p class="mt-1 text-sm text-text-dim">Sign in to continue.</p>
+				if errMsg != "" {
+					<p role="alert" class="mt-4 rounded-control border border-burnt px-3 py-2 text-sm text-burnt">
+						{ errMsg }
+					</p>
+				}
+				<form method="post" action="/login" class="mt-6 space-y-4">
+					<div>
+						<label for="username" class="block text-sm text-text-dim">Username</label>
+						<input
+							id="username"
+							name="username"
+							type="text"
+							required
+							autofocus
+							autocomplete="username"
+							class="mt-1 w-full rounded-control border border-line bg-surface-2 px-3 py-2 text-paper"
+						/>
+					</div>
+					<div>
+						<label for="password" class="block text-sm text-text-dim">Password</label>
+						<input
+							id="password"
+							name="password"
+							type="password"
+							required
+							autocomplete="current-password"
+							class="mt-1 w-full rounded-control border border-line bg-surface-2 px-3 py-2 text-paper"
+						/>
+					</div>
+					<button
+						type="submit"
+						class="w-full rounded-control bg-indigo px-3 py-2 font-medium text-paper"
+					>
+						Sign in
+					</button>
+				</form>
+			</div>
+		</main>
+	}
+}
+
+// LoginSuccess answers a successful POST /login with 200 (the session cookie
+// is already set) and moves the browser to the app: HX-Redirect covers HTMX
+// callers, the script covers everyone with JS, and the link is the no-JS
+// fallback.
+templ LoginSuccess() {
+	@Layout("Signed in · Timbre") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<p class="text-paper">
+				Signed in. <a href="/" class="text-olive underline">Continue to Timbre</a>.
+			</p>
+			<script>window.location.replace("/");</script>
+		</main>
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/web"
 )
@@ -22,12 +23,13 @@ import (
 type Server struct {
 	cfg    config.Config
 	db     *sql.DB
+	auth   *auth.Manager
 	router chi.Router
 }
 
-// New builds the router. Auth, voices and the job queue land in later goals.
-func New(cfg config.Config, database *sql.DB) *Server {
-	srv := &Server{cfg: cfg, db: database, router: chi.NewRouter()}
+// New builds the router. Voices and the job queue land in later goals.
+func New(cfg config.Config, database *sql.DB, authManager *auth.Manager) *Server {
+	srv := &Server{cfg: cfg, db: database, auth: authManager, router: chi.NewRouter()}
 	srv.routes()
 	return srv
 }
@@ -38,8 +40,13 @@ func (s *Server) routes() {
 	// arrives in a forwarded header.
 	s.router.Use(middleware.RealIP)
 	s.router.Use(middleware.Recoverer)
+	// Everything not on auth's exempt list requires a session.
+	s.router.Use(s.auth.Middleware)
 
 	s.router.Get("/healthz", s.handleHealth)
+	s.router.Get("/login", s.handleLoginPage)
+	s.router.Post("/login", s.handleLogin)
+	s.router.Post("/logout", s.handleLogout)
 	s.router.Handle("/static/*", http.StripPrefix("/static/",
 		http.FileServer(http.FS(web.StaticFS()))))
 	s.router.Get("/", templ.Handler(web.Shell()).ServeHTTP)

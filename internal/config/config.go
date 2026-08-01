@@ -43,6 +43,17 @@ type Config struct {
 	// RunPodAPIKey is the bearer token. Injected by Infisical at runtime.
 	RunPodAPIKey string
 
+	// AdminUsername and AdminPassword seed the first user on startup when the
+	// users table is empty (see internal/auth's Bootstrap). Injected by
+	// Infisical alongside RUNPOD_API_KEY.
+	AdminUsername string
+	AdminPassword string
+
+	// SessionSecret keys the HMAC that signs session cookies. Injected by
+	// Infisical; when empty an ephemeral key is generated at startup and all
+	// sessions die with the process.
+	SessionSecret string
+
 	// MaxInFlight caps how many jobs the worker keeps submitted at once.
 	MaxInFlight int
 }
@@ -56,6 +67,9 @@ func Load() (Config, error) {
 		PublicBaseURL:  strings.TrimRight(env("TIMBRE_PUBLIC_BASE_URL", ""), "/"),
 		RunPodEndpoint: strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
 		RunPodAPIKey:   os.Getenv("RUNPOD_API_KEY"),
+		AdminUsername:  os.Getenv("ADMIN_USERNAME"),
+		AdminPassword:  os.Getenv("ADMIN_PASSWORD"),
+		SessionSecret:  os.Getenv("TIMBRE_SESSION_SECRET"),
 	}
 
 	maxInFlight, err := strconv.Atoi(env("TIMBRE_MAX_IN_FLIGHT", "2"))
@@ -72,6 +86,13 @@ func Load() (Config, error) {
 
 // HasRunPodKey reports whether the API key was injected, without exposing it.
 func (c Config) HasRunPodKey() bool { return c.RunPodAPIKey != "" }
+
+// SecureCookies reports whether session cookies should carry the Secure flag:
+// true whenever the public base URL is HTTPS, i.e. in deployment where
+// Cloudflare terminates TLS. Local HTTP testing keeps it false.
+func (c Config) SecureCookies() bool {
+	return strings.HasPrefix(c.PublicBaseURL, "https://")
+}
 
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

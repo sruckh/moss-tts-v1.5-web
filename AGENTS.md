@@ -37,6 +37,15 @@ reference, rendered in itself.
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.
 - **Secrets come from Infisical, never from files in this repo.** See below.
+- **The whole UI is gated behind login.** `internal/auth` owns it: bcrypt
+  password hashes, a startup bootstrap that seeds the first admin from
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` (Infisical, next to `RUNPOD_API_KEY`) when
+  the users table is empty, and SQLite-backed gorilla/sessions with a signed
+  session-ID cookie (`HttpOnly`, `SameSite=Lax`, `Secure` when the public URL
+  is HTTPS; `TIMBRE_SESSION_SECRET` keys the HMAC, also from Infisical). The
+  middleware's public exempt list is defined once in `auth.Exempt` — `/login`,
+  `/healthz`, `/static/*`, and `/refs/*` (the public reference-audio route,
+  Goal 3). Everything else 302s to `/login` (401 for HTMX/JSON).
 - **The palette is exhaustive**: exactly the ten hexes in `DESIGN.md`. New
   values only ever come from `color-mix()` of two of them.
 
@@ -125,6 +134,8 @@ Whatever you change, this must still hold:
 - `docker inspect timbre-app --format '{{json .NetworkSettings.Ports}}'` shows
   no `HostPort`, and the container is attached to `shared_net`.
 - `/healthz` answers `{"ok":true}`.
+- `GET /` without a session cookie answers 302 to `/login`; logging in with
+  the bootstrapped admin and replaying the cookie answers 200.
 - `docker logs timbre-litestream` shows `replicating to … type=s3` and no errors.
 
 <!-- outline:global-rules (managed by the outline skill) -->
