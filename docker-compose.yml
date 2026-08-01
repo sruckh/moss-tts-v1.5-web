@@ -1,0 +1,80 @@
+name: timbre
+
+services:
+  # The app. Deliberately has no `ports:` — it is reachable only on shared_net,
+  # where NGINX Proxy Manager forwards the public hostname to it and Cloudflare
+  # terminates TLS in front of that.
+  app:
+    build:
+      context: .
+      target: runtime
+    image: timbre:latest
+    container_name: timbre-app
+    restart: unless-stopped
+    expose:
+      - "8080"
+    networks:
+      - shared_net
+    environment:
+      TIMBRE_ADDR: ":8080"
+      TIMBRE_DB_PATH: /data/timbre.db
+      TIMBRE_AUDIO_DIR: /data/audio
+      # The Cloudflare hostname this app answers on. Reference-audio URLs are
+      # built from it, because RunPod's workers fetch reference_url themselves —
+      # so this must be the externally reachable name, not the container's.
+      TIMBRE_PUBLIC_BASE_URL: ${TIMBRE_PUBLIC_BASE_URL:-}
+      # Server-side config, never a URL the browser is given.
+      RUNPOD_ENDPOINT: ${RUNPOD_ENDPOINT:-}
+      # Universal Auth machine identity — the entrypoint trades these for a
+      # short-lived token and runs the app under `infisical run`, which is what
+      # puts RUNPOD_API_KEY in the environment. Export them into your shell
+      # before `docker compose up` (see scripts/env.sh); never commit them.
+      INFISICAL_DOMAIN: ${INFISICAL_HOST:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_ENV: ${INFISICAL_ENV:-prod}
+      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET:-}
+    volumes:
+      - db:/data
+
+  # Sidecar: replicates /data/timbre.db to Backblaze B2 by following its WAL.
+  # Runs under the same Infisical entrypoint as the app — the S3 credentials in
+  # litestream.yml are environment expansions filled in by `infisical run`.
+  litestream:
+    build:
+      context: .
+      target: litestream
+    image: timbre-litestream:latest
+    container_name: timbre-litestream
+    restart: unless-stopped
+    depends_on:
+      - app
+    networks:
+      - shared_net
+    environment:
+      S3_REGION: ${S3_REGION:-us-west-001}
+      INFISICAL_DOMAIN: ${INFISICAL_HOST:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_ENV: ${INFISICAL_ENV:-prod}
+      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET:-}
+    volumes:
+      - db:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+
+  # Toolchain image (Go + generated templ + compiled CSS) for running the suite:
+  #   docker compose run --rm test
+  # Under `tools`, so `docker compose up -d` never starts it.
+  test:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: test
+    image: timbre-test:latest
+
+networks:
+  shared_net:
+    external: true
+
+volumes:
+  db:

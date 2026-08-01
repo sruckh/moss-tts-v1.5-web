@@ -1,0 +1,16 @@
+# Litestream continuously replicates the SQLite file the app writes.
+#
+# The app and this sidecar mount the same volume at /data, so litestream sees
+# the DB and its WAL (the app opens SQLite in WAL mode for exactly this reason).
+#
+# The replica is off-host: a Backblaze B2 bucket over the S3 API. Every value
+# below is expanded from the environment, and that environment is populated by
+# `infisical run` in the container entrypoint — no credential is written here.
+dbs:
+  - path: /data/timbre.db
+    replica:
+      url: s3://${S3_BUCKET}/timbre
+      endpoint: ${S3_ENDPOINT}
+      region: ${S3_REGION}
+      access-key-id: ${S3_KEY_ID}
+      secret-access-key: ${S3_APP_KEY}

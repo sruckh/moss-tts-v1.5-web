@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timbre — Design System for a Text-to-Speech Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   TOKENS — every value below is a palette color or a color-mix
+   of two palette colors. Nothing else enters the system.
+   ============================================================ */
+:root{
+  /* Raw palette (from source swatches) */
+  --p1-blue:   #0000FF;  /* rgb(0,0,255)     */
+  --p2-purple: #83008C;  /* rgb(131,0,140)   */
+  --p3-burnt:  #C95D00;  /* rgb(201,93,0)    */
+  --p4-teal:   #006795;  /* rgb(0,103,149)   */
+  --p5-olive:  #9EB600;  /* rgb(158,182,0)   */
+  --p6-amber:  #C98500;  /* rgb(201,133,0)   */
+  --p7-green:  #009044;  /* rgb(0,144,68)    */
+  --p8-paper:  #D5D5F4;  /* rgb(213,213,244) */
+  --p9-indigo: #4A4AC8;  /* rgb(74,74,200)   */
+  --p10-ink:   #00003E;  /* rgb(0,0,62)      */
+
+  /* Surfaces — ink lifted toward paper */
+  --canvas:    var(--p10-ink);
+  --surface-1: color-mix(in srgb, var(--p10-ink) 92%, var(--p8-paper));
+  --surface-2: color-mix(in srgb, var(--p10-ink) 85%, var(--p8-paper));
+  --surface-3: color-mix(in srgb, var(--p10-ink) 78%, var(--p8-paper));
+  --line:      color-mix(in srgb, var(--p10-ink) 75%, var(--p8-paper));
+  --line-loud: color-mix(in srgb, var(--p10-ink) 58%, var(--p8-paper));
+
+  /* Text */
+  --text:       var(--p8-paper);
+  --text-dim:   color-mix(in srgb, var(--p8-paper) 65%, var(--p10-ink));
+  --text-faint: color-mix(in srgb, var(--p8-paper) 42%, var(--p10-ink));
+
+  /* Action */
+  --primary:       var(--p9-indigo);
+  --primary-hover: color-mix(in srgb, var(--p9-indigo) 85%, var(--p8-paper));
+  --primary-press: color-mix(in srgb, var(--p9-indigo) 82%, var(--p10-ink));
+  --on-primary:    var(--p8-paper);
+
+  /* Semantics */
+  --speaking:  var(--p5-olive);   /* live speech, focus, playhead */
+  --ready:     var(--p7-green);   /* rendered, commercial-safe   */
+  --working:   var(--p6-amber);   /* queued, cold start, warming */
+  --limit:     var(--p3-burnt);   /* over budget, restricted     */
+  --signal:    var(--p4-teal);    /* waveform, informational     */
+  --cloned:    var(--p2-purple);  /* cloned / custom voice       */
+  --decor:     var(--p1-blue);    /* decorative gradients ONLY   */
+
+  /* Tinted fills (10% of a hue over ink) */
+  --tint-ready:   color-mix(in srgb, var(--p7-green) 16%, var(--p10-ink));
+  --tint-working: color-mix(in srgb, var(--p6-amber) 16%, var(--p10-ink));
+  --tint-limit:   color-mix(in srgb, var(--p3-burnt) 16%, var(--p10-ink));
+  --tint-signal:  color-mix(in srgb, var(--p4-teal) 20%, var(--p10-ink));
+  --tint-cloned:  color-mix(in srgb, var(--p2-purple) 22%, var(--p10-ink));
+  --tint-speak:   color-mix(in srgb, var(--p5-olive) 14%, var(--p10-ink));
+
+  /* Type */
+  --display: "Bricolage Grotesque", "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --body: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Space — 4px base */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px; --s8:72px;
+  /* Radius */
+  --r-sm:4px; --r-md:8px; --r-lg:14px; --r-pill:999px;
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth; scroll-padding-top:var(--s5)}
+body{
+  margin:0; background:var(--canvas); color:var(--text);
+  font-family:var(--body); font-size:15px; line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--speaking)}
+
+/* ---------- Layout shell ---------- */
+.shell{display:grid; grid-template-columns:232px minmax(0,1fr); gap:var(--s7); max-width:1180px; margin:0 auto; padding:0 var(--s5)}
+.rail{position:sticky; top:0; align-self:start; height:100vh; padding:var(--s6) 0; overflow-y:auto}
+.rail-mark{font-family:var(--display); font-weight:800; font-size:19px; letter-spacing:-0.02em; margin-bottom:var(--s5); display:flex; align-items:center; gap:var(--s2)}
+.rail-dot{width:9px; height:9px; border-radius:50%; background:var(--speaking)}
+.rail nav{display:flex; flex-direction:column; gap:2px; border-left:1px solid var(--line)}
+.rail nav a{
+  font-family:var(--mono); font-size:11.5px; letter-spacing:0.04em; text-transform:uppercase;
+  color:var(--text-faint); text-decoration:none; padding:6px var(--s3); margin-left:-1px;
+  border-left:1px solid transparent;
+}
+.rail nav a:hover{color:var(--text)}
+.rail nav a.on{color:var(--speaking); border-left-color:var(--speaking)}
+main{padding:var(--s7) 0 var(--s8); min-width:0}
+
+/* ---------- Section furniture ---------- */
+.sec{padding-block:var(--s7) 0; border-top:1px solid var(--line); margin-top:var(--s7)}
+.sec:first-of-type{border-top:0; margin-top:0; padding-top:0}
+.eyebrow{font-family:var(--mono); font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:var(--text-faint); margin:0 0 var(--s2)}
+h2{font-family:var(--display); font-size:clamp(24px,3vw,32px); font-weight:600; letter-spacing:-0.02em; margin:0 0 var(--s2)}
+h3{font-family:var(--display); font-size:16px; font-weight:600; letter-spacing:-0.01em; margin:var(--s6) 0 var(--s3)}
+.lede{color:var(--text-dim); max-width:62ch; margin:0 0 var(--s5)}
+.note{font-size:13px; color:var(--text-faint); max-width:62ch}
+code{font-family:var(--mono); font-size:0.88em; background:var(--surface-2); padding:1px 5px; border-radius:var(--r-sm); color:var(--text-dim)}
+
+/* ---------- Masthead ---------- */
+.masthead{padding:var(--s8) 0 var(--s6)}
+.spectrum{display:flex; gap:3px; height:104px; align-items:flex-end; margin-bottom:var(--s5)}
+.spectrum i{flex:1; border-radius:2px 2px 0 0; transform-origin:bottom; animation:lvl 3.2s ease-in-out infinite}
+@keyframes lvl{0%,100%{transform:scaleY(1)} 50%{transform:scaleY(.62)}}
+@media (prefers-reduced-motion:reduce){.spectrum i{animation:none}}
+.masthead h1{font-family:var(--display); font-size:clamp(38px,6.4vw,68px); font-weight:800; letter-spacing:-0.045em; line-height:0.96; margin:0 0 var(--s3); max-width:16ch}
+.masthead h1 em{font-style:normal; color:var(--speaking)}
+.masthead p{color:var(--text-dim); max-width:56ch; font-size:17px; margin:0}
+.meta{display:flex; flex-wrap:wrap; gap:var(--s5); margin-top:var(--s6); font-family:var(--mono); font-size:11.5px; letter-spacing:0.05em; text-transform:uppercase; color:var(--text-faint)}
+.meta b{display:block; color:var(--text); font-weight:500; letter-spacing:0.02em; text-transform:none; font-size:13px}
+
+/* ---------- Swatches ---------- */
+.swatches{display:grid; grid-template-columns:repeat(auto-fill,minmax(212px,1fr)); gap:var(--s3)}
+.sw{background:var(--surface-1); border:1px solid var(--line); border-radius:var(--r-md); overflow:hidden}
+.sw .chip{height:66px; display:flex; align-items:flex-end; justify-content:flex-end; padding:var(--s2)}
+.sw .chip span{font-family:var(--mono); font-size:10px; padding:2px 6px; border-radius:var(--r-sm); background:color-mix(in srgb, var(--p10-ink) 72%, transparent); color:var(--p8-paper)}
+.sw .body{padding:var(--s3)}
+.sw dt{font-family:var(--mono); font-size:11px; color:var(--text); letter-spacing:0.03em}
+.sw dd{margin:2px 0 0; font-size:12.5px; color:var(--text-faint); line-height:1.45}
+.sw .ratio{margin-top:var(--s2); font-family:var(--mono); font-size:10.5px; color:var(--text-dim)}
+
+/* ---------- Type scale ---------- */
+.scale{display:grid; gap:var(--s4)}
+.scale-row{display:grid; grid-template-columns:130px minmax(0,1fr); gap:var(--s4); align-items:baseline; padding-bottom:var(--s4); border-bottom:1px solid var(--line)}
+.scale-row:last-child{border-bottom:0}
+.scale-key{font-family:var(--mono); font-size:11px; color:var(--text-faint); line-height:1.5}
+.t-display{font-family:var(--display); font-size:44px; font-weight:800; letter-spacing:-0.04em; line-height:1}
+.t-title{font-family:var(--display); font-size:26px; font-weight:600; letter-spacing:-0.02em}
+.t-head{font-family:var(--display); font-size:16px; font-weight:600}
+.t-body{font-size:15px}
+.t-small{font-size:13px; color:var(--text-dim)}
+.t-label{font-family:var(--mono); font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--text-faint)}
+.t-data{font-family:var(--mono); font-size:13px; font-variant-numeric:tabular-nums}
+
+/* ---------- Generic demo frame ---------- */
+.frame{background:var(--surface-1); border:1px solid var(--line); border-radius:var(--r-lg); padding:var(--s5)}
+.frame + .frame{margin-top:var(--s3)}
+.row{display:flex; flex-wrap:wrap; gap:var(--s3); align-items:center}
+.grid-2{display:grid; grid-template-columns:repeat(auto-fit,minmax(268px,1fr)); gap:var(--s3)}
+
+/* ---------- Buttons ---------- */
+.btn{
+  font-family:var(--body); font-size:14px; font-weight:600; letter-spacing:-0.005em;
+  padding:9px 16px; border-radius:var(--r-md); border:1px solid transparent;
+  background:var(--primary); color:var(--on-primary); cursor:pointer;
+  display:inline-flex; align-items:center; gap:var(--s2); transition:background .14s ease, border-color .14s ease, color .14s ease;
+}
+.btn:hover{background:var(--primary-hover)}
+.btn:active{background:var(--primary-press)}
+.btn--secondary{background:transparent; border-color:var(--line-loud); color:var(--text)}
+.btn--secondary:hover{background:var(--surface-2); border-color:var(--text-faint)}
+.btn--quiet{background:transparent; color:var(--text-dim); padding-inline:10px}
+.btn--quiet:hover{background:var(--surface-2); color:var(--text)}
+.btn--danger{background:transparent; border-color:var(--limit); color:var(--limit)}
+.btn--danger:hover{background:var(--tint-limit); color:var(--text)}
+.btn--sm{font-size:12.5px; padding:6px 11px}
+.btn[disabled]{opacity:.4; cursor:not-allowed}
+.btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, .sw:focus-visible{
+  outline:2px solid var(--speaking); outline-offset:2px;
+}
+.dot{width:6px; height:6px; border-radius:50%; background:currentColor; flex:none}
+.spin{width:12px; height:12px; border-radius:50%; border:2px solid color-mix(in srgb, var(--p8-paper) 30%, transparent); border-top-color:var(--p8-paper); animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
+
+/* ---------- Badges ---------- */
+.badge{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:0.07em; text-transform:uppercase;
+  padding:3px 8px; border-radius:var(--r-pill); display:inline-flex; align-items:center; gap:6px;
+  border:1px solid transparent;
+}
+.badge--ready{background:var(--tint-ready); color:var(--ready); border-color:color-mix(in srgb, var(--p7-green) 45%, transparent)}
+.badge--working{background:var(--tint-working); color:var(--working); border-color:color-mix(in srgb, var(--p6-amber) 45%, transparent)}
+.badge--limit{background:var(--tint-limit); color:var(--limit); border-color:color-mix(in srgb, var(--p3-burnt) 45%, transparent)}
+.badge--queued{background:var(--tint-signal); color:color-mix(in srgb, var(--p4-teal) 62%, var(--p8-paper)); border-color:color-mix(in srgb, var(--p4-teal) 55%, transparent)}
+.badge--cloned{background:var(--tint-cloned); color:color-mix(in srgb, var(--p2-purple) 45%, var(--p8-paper)); border-color:color-mix(in srgb, var(--p2-purple) 60%, transparent)}
+.badge--live{background:var(--tint-speak); color:var(--speaking); border-color:color-mix(in srgb, var(--p5-olive) 45%, transparent)}
+
+/* ---------- Fields ---------- */
+label.f{display:block; font-family:var(--mono); font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-faint); margin-bottom:6px}
+.input, select.input, textarea.input{
+  width:100%; background:var(--surface-2); border:1px solid var(--line); color:var(--text);
+  border-radius:var(--r-md); padding:10px var(--s3); font-family:var(--body); font-size:14px;
+}
+.input::placeholder{color:var(--text-faint)}
+.input:hover{border-color:var(--line-loud)}
+select.input{appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--text-dim) 50%),linear-gradient(135deg,var(--text-dim) 50%,transparent 50%); background-position:calc(100% - 17px) 18px, calc(100% - 12px) 18px; background-size:5px 5px; background-repeat:no-repeat}
+.help{font-size:12px; color:var(--text-faint); margin-top:6px}
+.help--limit{color:var(--limit)}
+
+/* Range */
+.range{width:100%; appearance:none; height:24px; background:transparent; cursor:pointer}
+.range::-webkit-slider-runnable-track{height:4px; border-radius:var(--r-pill); background:linear-gradient(to right, var(--primary) var(--fill,50%), var(--line) var(--fill,50%))}
+.range::-moz-range-track{height:4px; border-radius:var(--r-pill); background:var(--line)}
+.range::-moz-range-progress{height:4px; border-radius:var(--r-pill); background:var(--primary)}
+.range::-webkit-slider-thumb{appearance:none; width:14px; height:14px; margin-top:-5px; border-radius:50%; background:var(--p8-paper); border:3px solid var(--primary)}
+.range::-moz-range-thumb{width:14px; height:14px; border:3px solid var(--primary); border-radius:50%; background:var(--p8-paper)}
+.range-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:2px}
+.range-val{font-family:var(--mono); font-size:12px; color:var(--text); font-variant-numeric:tabular-nums}
+
+/* Switch */
+.sw-toggle{display:inline-flex; align-items:center; gap:var(--s3); cursor:pointer}
+.sw-toggle input{position:absolute; opacity:0; width:0; height:0}
+.track{width:38px; height:22px; border-radius:var(--r-pill); background:var(--surface-3); border:1px solid var(--line-loud); position:relative; transition:background .16s ease, border-color .16s ease}
+.knob{position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:var(--text-faint); transition:transform .16s ease, background .16s ease}
+.sw-toggle input:checked + .track{background:var(--tint-ready); border-color:var(--ready)}
+.sw-toggle input:checked + .track .knob{transform:translateX(16px); background:var(--ready)}
+.sw-toggle input:focus-visible + .track{outline:2px solid var(--speaking); outline-offset:2px}
+
+/* ---------- Voice cards ---------- */
+.voice{background:var(--surface-1); border:1px solid var(--line); border-radius:var(--r-lg); padding:var(--s4); display:flex; flex-direction:column; gap:var(--s3); text-align:left; cursor:pointer; transition:border-color .14s ease, background .14s ease}
+.voice:hover{border-color:var(--line-loud)}
+.voice[aria-pressed="true"]{border-color:var(--primary); background:color-mix(in srgb, var(--p9-indigo) 12%, var(--p10-ink))}
+.voice-top{display:flex; justify-content:space-between; align-items:flex-start; gap:var(--s3)}
+.voice-name{font-family:var(--display); font-size:17px; font-weight:600; letter-spacing:-0.015em}
+.voice-model{font-family:var(--mono); font-size:11px; color:var(--text-faint); margin-top:2px}
+.mini-wave{display:flex; align-items:center; gap:2px; height:26px}
+.mini-wave i{width:3px; border-radius:var(--r-pill); background:var(--signal)}
+
+/* ---------- Signature: the spoken line ---------- */
+.player{background:var(--surface-1); border:1px solid var(--line); border-radius:var(--r-lg); overflow:hidden}
+.player-bar{display:flex; align-items:center; gap:var(--s4); padding:var(--s4) var(--s5); border-bottom:1px solid var(--line)}
+.play{width:42px; height:42px; flex:none; border-radius:50%; border:0; background:var(--primary); color:var(--on-primary); cursor:pointer; display:grid; place-items:center}
+.play:hover{background:var(--primary-hover)}
+.wave{flex:1; display:flex; align-items:center; gap:2px; height:52px; min-width:0}
+.wave i{flex:1; border-radius:var(--r-pill); background:var(--line-loud); transition:background .12s linear}
+.wave i.past{background:var(--signal)}
+.wave i.now{background:var(--speaking)}
+.time{font-family:var(--mono); font-size:12px; color:var(--text-dim); font-variant-numeric:tabular-nums; flex:none}
+.script{padding:var(--s5); font-size:19px; line-height:1.85; font-family:var(--body)}
+.script w{color:var(--text-faint); transition:color .1s linear, background .1s linear; padding:1px 0; border-radius:var(--r-sm)}
+.script w.said{color:var(--text-dim)}
+.script w.now{color:var(--p10-ink); background:var(--speaking); box-shadow:0 0 0 3px var(--speaking)}
+.script tag{font-family:var(--mono); font-size:12px; color:var(--cloned); background:var(--tint-cloned); border:1px solid color-mix(in srgb, var(--p2-purple) 55%, transparent); padding:1px 6px; border-radius:var(--r-sm); white-space:nowrap}
+.player-foot{display:flex; flex-wrap:wrap; gap:var(--s3); align-items:center; justify-content:space-between; padding:var(--s3) var(--s5); border-top:1px solid var(--line); background:var(--surface-2)}
+
+/* ---------- Editor ---------- */
+.editor{background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-md); padding:var(--s4); font-size:15px; line-height:1.8; min-height:118px}
+.count{display:flex; justify-content:space-between; align-items:center; margin-top:var(--s2); font-family:var(--mono); font-size:11.5px; color:var(--text-faint)}
+.meter{height:3px; background:var(--line); border-radius:var(--r-pill); overflow:hidden; margin-top:var(--s2)}
+.meter i{display:block; height:100%; background:var(--speaking)}
+
+/* ---------- Table ---------- */
+table{width:100%; border-collapse:collapse; font-size:13.5px}
+th{font-family:var(--mono); font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:var(--text-faint); text-align:left; font-weight:400; padding:0 var(--s3) var(--s2)}
+td{padding:var(--s3); border-top:1px solid var(--line); vertical-align:middle}
+td.num{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--text-dim)}
+
+/* ---------- Alerts ---------- */
+.alert{display:flex; gap:var(--s3); padding:var(--s3) var(--s4); border-radius:var(--r-md); border-left:3px solid var(--line-loud); background:var(--surface-2); font-size:13.5px}
+.alert b{font-weight:600; display:block; margin-bottom:2px}
+.alert--limit{border-left-color:var(--limit); background:var(--tint-limit)}
+.alert--working{border-left-color:var(--working); background:var(--tint-working)}
+.alert--ready{border-left-color:var(--ready); background:var(--tint-ready)}
+.alert p{margin:0; color:var(--text-dim)}
+
+/* ---------- Empty ---------- */
+.empty{text-align:center; padding:var(--s7) var(--s5); border:1px dashed var(--line-loud); border-radius:var(--r-lg)}
+.empty h4{font-family:var(--display); font-size:19px; font-weight:600; margin:var(--s3) 0 var(--s2)}
+.empty p{color:var(--text-dim); margin:0 auto var(--s4); max-width:40ch; font-size:14px}
+
+/* ---------- Do / Don't ---------- */
+.rules{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:var(--s3)}
+.rule{border:1px solid var(--line); border-radius:var(--r-md); padding:var(--s4); background:var(--surface-1)}
+.rule h5{margin:0 0 var(--s3); font-family:var(--mono); font-size:11px; letter-spacing:0.12em; text-transform:uppercase}
+.rule--do h5{color:var(--ready)}
+.rule--dont h5{color:var(--limit)}
+.rule li{margin-bottom:var(--s2); color:var(--text-dim); font-size:13.5px}
+.rule ul{margin:0; padding-left:18px}
+
+footer{margin-top:var(--s8); padding-top:var(--s5); border-top:1px solid var(--line); font-family:var(--mono); font-size:11px; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:var(--s3)}
+
+@media (max-width:900px){
+  .shell{grid-template-columns:1fr; gap:0}
+  .rail{position:static; height:auto; padding:var(--s5) 0 0}
+  .rail nav{flex-direction:row; flex-wrap:wrap; border-left:0; gap:var(--s1)}
+  .rail nav a{border-left:0; border-bottom:1px solid transparent; padding:4px 8px}
+  .rail nav a.on{border-left-color:transparent; border-bottom-color:var(--speaking)}
+  main{padding-top:var(--s5)}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="rail">
+    <div class="rail-mark"><span class="rail-dot"></span> Timbre DS</div>
+    <nav id="nav">
+      <a href="#palette">01 Palette</a>
+      <a href="#surfaces">02 Surfaces</a>
+      <a href="#type">03 Typography</a>
+      <a href="#space">04 Space &amp; shape</a>
+      <a href="#actions">05 Actions</a>
+      <a href="#status">06 Status</a>
+      <a href="#fields">07 Fields</a>
+      <a href="#voices">08 Voice library</a>
+      <a href="#playback">09 Playback</a>
+      <a href="#queue">10 Render queue</a>
+      <a href="#messages">11 Messages</a>
+      <a href="#rules">12 Rules</a>
+    </nav>
+  </aside>
+
+  <main>
+
+    <header class="masthead">
+      <div class="spectrum" id="spectrum" aria-hidden="true"></div>
+      <h1>Ten colors, one <em>voice</em>.</h1>
+      <p>The design system for Timbre — a studio interface for turning written text into synthetic speech across a rack of models. Built entirely from the supplied palette, with no color invented along the way.</p>
+      <div class="meta">
+        <div>Palette<b>10 fixed values</b></div>
+        <div>Base theme<b>Ink, always dark</b></div>
+        <div>Contrast floor<b>WCAG AA</b></div>
+        <div>Version<b>1.0</b></div>
+      </div>
+    </header>
+
+    <!-- 01 PALETTE -->
+    <section class="sec" id="palette">
+      <p class="eyebrow">01 — Palette</p>
+      <h2>Every color has one job</h2>
+      <p class="lede">Nine of the ten swatches carry a role. Pure blue is the exception: it is beautiful and nearly unusable, so it is restricted to decorative gradients where nothing depends on being read. Ratios below are measured against the ink canvas.</p>
+      <div class="swatches" id="swatches"></div>
+      <p class="note" style="margin-top:var(--s4)">Derived values — hovers, tints, borders, muted text — are produced only by <code>color-mix()</code> between two palette colors. That keeps the system honest: paste any computed value into the picker and it lands on the line between two swatches.</p>
+    </section>
+
+    <!-- 02 SURFACES -->
+    <section class="sec" id="surfaces">
+      <p class="eyebrow">02 — Surfaces</p>
+      <h2>Ink lifted toward paper</h2>
+      <p class="lede">Depth is a mix ratio, not a shadow. Each step folds more Paper into Ink. Shadows are avoided entirely; on a navy this deep they read as smudges.</p>
+      <div class="grid-2" id="surfaceDemo"></div>
+    </section>
+
+    <!-- 03 TYPE -->
+    <section class="sec" id="type">
+      <p class="eyebrow">03 — Typography</p>
+      <h2>Three faces, three jobs</h2>
+      <p class="lede">Bricolage Grotesque sets anything that names something — it has the slightly irregular, cut-metal quality of studio equipment lettering. Instrument Sans carries the reading, including the script itself. IBM Plex Mono handles anything measurable: durations, sample rates, token counts, model IDs.</p>
+      <div class="scale">
+        <div class="scale-row"><div class="scale-key">display / 44 / 800<br>-0.04em</div><div class="t-display">Render voice</div></div>
+        <div class="scale-row"><div class="scale-key">title / 26 / 600<br>-0.02em</div><div class="t-title">Narration, take 3</div></div>
+        <div class="scale-row"><div class="scale-key">head / 16 / 600</div><div class="t-head">Prosody controls</div></div>
+        <div class="scale-row"><div class="scale-key">body / 15 / 400<br>1.6</div><div class="t-body">Paste a script, pick a voice, and set the pace. Long text is split at sentence boundaries and stitched back together after synthesis.</div></div>
+        <div class="scale-row"><div class="scale-key">small / 13 / 400</div><div class="t-small">Cold starts add roughly 20 seconds to the first render on an idle endpoint.</div></div>
+        <div class="scale-row"><div class="scale-key">label / mono 11<br>0.14em / upper</div><div class="t-label">Sample rate</div></div>
+        <div class="scale-row"><div class="scale-key">data / mono 13<br>tabular</div><div class="t-data">00:04.128 · 48 kHz · 1,204 chars</div></div>
+      </div>
+    </section>
+
+    <!-- 04 SPACE -->
+    <section class="sec" id="space">
+      <p class="eyebrow">04 — Space &amp; shape</p>
+      <h2>Four-pixel grid, four radii</h2>
+      <p class="lede">Spacing steps: 4, 8, 12, 16, 24, 32, 48, 72. Corners: 4 for chips and inline marks, 8 for controls, 14 for containers, full round for pills and transport buttons.</p>
+      <div class="frame">
+        <div class="row" id="spaceDemo"></div>
+      </div>
+    </section>
+
+    <!-- 05 ACTIONS -->
+    <section class="sec" id="actions">
+      <p class="eyebrow">05 — Actions</p>
+      <h2>One indigo button per view</h2>
+      <p class="lede">Indigo means synthesis — the thing that costs GPU seconds. Everything else recedes. Destructive actions borrow Burnt, outlined rather than filled, because deleting a render is recoverable and shouldn't shout louder than rendering one.</p>
+      <div class="frame">
+        <div class="row">
+          <button class="btn">Render speech</button>
+          <button class="btn btn--secondary">Preview 5s</button>
+          <button class="btn btn--quiet">Reset controls</button>
+          <button class="btn btn--danger">Delete take</button>
+        </div>
+        <div class="row" style="margin-top:var(--s4)">
+          <button class="btn btn--sm">Render</button>
+          <button class="btn btn--secondary btn--sm">Duplicate</button>
+          <button class="btn" disabled>Render speech</button>
+          <button class="btn"><span class="spin" aria-hidden="true"></span> Rendering</button>
+        </div>
+        <p class="note" style="margin-top:var(--s4)">Focus is Olive at 2px with a 2px offset, on every interactive element, in both themes. It is the only place the brightest color in the palette appears on small elements — which is exactly why it works.</p>
+      </div>
+    </section>
+
+    <!-- 06 STATUS -->
+    <section class="sec" id="status">
+      <p class="eyebrow">06 — Status</p>
+      <h2>Render states and license state</h2>
+      <p class="lede">Two independent axes share one badge component. Render state answers "is the audio there yet." License state answers "may this audio ship" — a real constraint when half the model rack is research-only.</p>
+      <div class="frame">
+        <h3 style="margin-top:0">Render</h3>
+        <div class="row">
+          <span class="badge badge--ready"><span class="dot"></span> Ready</span>
+          <span class="badge badge--working"><span class="dot"></span> Rendering</span>
+          <span class="badge badge--queued"><span class="dot"></span> Queued</span>
+          <span class="badge badge--working"><span class="dot"></span> Warming GPU</span>
+          <span class="badge badge--limit"><span class="dot"></span> Failed</span>
+        </div>
+        <h3>Voice &amp; license</h3>
+        <div class="row">
+          <span class="badge badge--ready">Commercial-safe</span>
+          <span class="badge badge--limit">Non-commercial</span>
+          <span class="badge badge--cloned">Cloned voice</span>
+          <span class="badge badge--live"><span class="dot"></span> Speaking</span>
+        </div>
+        <p class="note" style="margin-top:var(--s4)">Green and Burnt never both mean "good" or "bad" in the same view. Green is permission, Burnt is refusal. Amber is always motion — something is happening and will end on its own.</p>
+      </div>
+    </section>
+
+    <!-- 07 FIELDS -->
+    <section class="sec" id="fields">
+      <p class="eyebrow">07 — Fields</p>
+      <h2>Script in, parameters around it</h2>
+      <p class="lede">The script editor is the widest, quietest surface on the page. Inline markup tags render as purple chips so a writer can see the difference between words that will be spoken and instructions that will be obeyed.</p>
+
+      <div class="frame">
+        <label class="f" for="scriptbox">Script</label>
+        <div class="editor" id="scriptbox" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false">Welcome back. <tag contenteditable="false">[pause 400ms]</tag> Your last render finished while you were away — twenty-two seconds of audio, ready to download. <tag contenteditable="false">[emphasis]</tag>Nothing was lost.<tag contenteditable="false">[/emphasis]</tag></div>
+        <div class="count"><span>1,204 / 5,000 characters</span><span>≈ 0:47 at current pace</span></div>
+        <div class="meter"><i style="width:24%"></i></div>
+      </div>
+
+      <div class="frame">
+        <div class="grid-2">
+          <div>
+            <label class="f" for="model">Model</label>
+            <select class="input" id="model">
+              <option>Chatterbox — expressive, MIT</option>
+              <option>Qwen3-TTS — multilingual, Apache 2.0</option>
+              <option>Higgs Audio v2 — long-form, Apache 2.0</option>
+              <option>EchoTTS — research only</option>
+            </select>
+            <p class="help">Endpoint idle. First render adds a cold start.</p>
+          </div>
+          <div>
+            <label class="f" for="seed">Seed</label>
+            <input class="input" id="seed" value="184203" inputmode="numeric">
+            <p class="help">Reuse a seed to reproduce a take exactly.</p>
+          </div>
+        </div>
+
+        <div class="grid-2" style="margin-top:var(--s5)">
+          <div>
+            <div class="range-head"><label class="f" for="rate" style="margin:0">Pace</label><span class="range-val" id="rateOut">1.00×</span></div>
+            <input class="range" type="range" id="rate" min="0.5" max="2" step="0.05" value="1">
+          </div>
+          <div>
+            <div class="range-head"><label class="f" for="pitch" style="margin:0">Pitch</label><span class="range-val" id="pitchOut">0 st</span></div>
+            <input class="range" type="range" id="pitch" min="-12" max="12" step="1" value="0">
+          </div>
+          <div>
+            <div class="range-head"><label class="f" for="temp" style="margin:0">Expressiveness</label><span class="range-val" id="tempOut">0.65</span></div>
+            <input class="range" type="range" id="temp" min="0" max="1" step="0.01" value="0.65">
+          </div>
+          <div>
+            <label class="f">Output</label>
+            <div class="row" style="gap:var(--s5)">
+              <label class="sw-toggle"><input type="checkbox" checked><span class="track"><span class="knob"></span></span><span style="font-size:13.5px">48 kHz WAV</span></label>
+              <label class="sw-toggle"><input type="checkbox"><span class="track"><span class="knob"></span></span><span style="font-size:13.5px">Normalize</span></label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="frame">
+        <label class="f" for="over">Script — over limit</label>
+        <input class="input" id="over" value="7,318 characters pasted" style="border-color:var(--limit)">
+        <p class="help help--limit">2,318 characters past the model's limit. Trim the script or switch to Higgs Audio v2, which handles long-form.</p>
+      </div>
+    </section>
+
+    <!-- 08 VOICES -->
+    <section class="sec" id="voices">
+      <p class="eyebrow">08 — Voice library</p>
+      <h2>A voice is a card</h2>
+      <p class="lede">Each card carries a name, the model behind it, a fingerprint of its sample, and whether it can be shipped. Selection is a border, not a checkbox — the whole card is the target.</p>
+      <div class="grid-2" id="voiceGrid"></div>
+    </section>
+
+    <!-- 09 PLAYBACK -->
+    <section class="sec" id="playback">
+      <p class="eyebrow">09 — Playback</p>
+      <h2>The spoken line</h2>
+      <p class="lede">The signature component. Waveform and script are one instrument: the played portion of the wave turns Teal, the word being spoken right now sits in Olive, and everything already said settles to dim Paper. It is the only place in the product where color moves.</p>
+      <div class="player">
+        <div class="player-bar">
+          <button class="play" id="playBtn" aria-label="Play preview">
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true" id="playIcon"><path d="M3 2l10 5.5L3 13z"/></svg>
+          </button>
+          <div class="wave" id="wave" aria-hidden="true"></div>
+          <span class="time" id="time">0:00 / 0:06</span>
+        </div>
+        <p class="script" id="script"></p>
+        <div class="player-foot">
+          <div class="row">
+            <span class="badge badge--ready"><span class="dot"></span> Ready</span>
+            <span class="badge badge--cloned">Cloned voice</span>
+            <span class="t-data" style="color:var(--text-faint)">48 kHz · 6.02 s · seed 184203</span>
+          </div>
+          <div class="row">
+            <button class="btn btn--quiet btn--sm">Download WAV</button>
+            <button class="btn btn--secondary btn--sm">Render again</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 10 QUEUE -->
+    <section class="sec" id="queue">
+      <p class="eyebrow">10 — Render queue</p>
+      <h2>What the GPU is doing</h2>
+      <p class="lede">Serverless endpoints sleep. The queue is honest about that: warming is a state of its own, not a disguised spinner, and every row shows what it cost.</p>
+      <div class="frame" style="padding:var(--s4)">
+        <table>
+          <thead><tr><th>Take</th><th>Voice</th><th>State</th><th>Length</th><th>GPU</th></tr></thead>
+          <tbody>
+            <tr><td>Intro — take 3</td><td>Ash</td><td><span class="badge badge--ready"><span class="dot"></span> Ready</span></td><td class="num">0:06.02</td><td class="num">4.1 s</td></tr>
+            <tr><td>Chapter 2 full read</td><td>Marrow</td><td><span class="badge badge--working"><span class="dot"></span> Rendering</span></td><td class="num">—</td><td class="num">38 s</td></tr>
+            <tr><td>Ad spot, 30s</td><td>Vellum</td><td><span class="badge badge--working"><span class="dot"></span> Warming GPU</span></td><td class="num">—</td><td class="num">—</td></tr>
+            <tr><td>Pronunciation test</td><td>Ash</td><td><span class="badge badge--queued"><span class="dot"></span> Queued</span></td><td class="num">—</td><td class="num">—</td></tr>
+            <tr><td>Outro — take 1</td><td>Cinder</td><td><span class="badge badge--limit"><span class="dot"></span> Failed</span></td><td class="num">—</td><td class="num">2.4 s</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 11 MESSAGES -->
+    <section class="sec" id="messages">
+      <p class="eyebrow">11 — Messages</p>
+      <h2>Say what happened, then what to do</h2>
+      <p class="lede">Messages inherit the status colors exactly. No message uses a color the status system hasn't already defined, so a reader learns the vocabulary once.</p>
+      <div class="frame" style="display:grid; gap:var(--s3)">
+        <div class="alert alert--ready"><div><b>Render finished</b><p>Intro — take 3 is ready. 6.02 seconds, 48 kHz.</p></div></div>
+        <div class="alert alert--working"><div><b>Warming the endpoint</b><p>The GPU was idle. The first render will start in about 20 seconds; later ones start immediately.</p></div></div>
+        <div class="alert alert--limit"><div><b>This voice can't ship</b><p>EchoTTS is licensed for non-commercial output. Pick a commercial-safe voice to use this audio in client work.</p></div></div>
+      </div>
+      <h3>Empty state</h3>
+      <div class="empty">
+        <span class="badge badge--live"><span class="dot"></span> Nothing rendered yet</span>
+        <h4>Your voice library is quiet</h4>
+        <p>Upload thirty seconds of clean speech to clone a voice, or start from one of the stock models.</p>
+        <div class="row" style="justify-content:center">
+          <button class="btn">Clone a voice</button>
+          <button class="btn btn--secondary">Browse stock voices</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12 RULES -->
+    <section class="sec" id="rules">
+      <p class="eyebrow">12 — Rules</p>
+      <h2>How to stay inside the palette</h2>
+      <div class="rules">
+        <div class="rule rule--do">
+          <h5>Do</h5>
+          <ul>
+            <li>Keep Olive for live speech and focus. Its brightness is a signal, not a decoration.</li>
+            <li>Fill with Indigo, Purple or Teal only when the text on top is Paper at 15px semibold or larger.</li>
+            <li>Derive every new value with <code>color-mix()</code> between two palette colors.</li>
+            <li>Pair every color-coded state with a word. Color is the second signal, never the only one.</li>
+            <li>Use tabular mono for anything that ticks: duration, characters, GPU seconds.</li>
+          </ul>
+        </div>
+        <div class="rule rule--dont">
+          <h5>Don't</h5>
+          <ul>
+            <li>Set text in pure Blue anywhere. It measures 2.3:1 on Ink and fails every threshold.</li>
+            <li>Put Teal text on Ink below 19px — it needs the large-text allowance or a Paper fill.</li>
+            <li>Introduce a neutral gray. Gray is what happens when you skip the mix step.</li>
+            <li>Animate anything except the playhead, the spectrum, and the render spinner.</li>
+            <li>Use Green for a primary button. Green is permission; Indigo is action.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Timbre design system · v1.0</span>
+      <span>10 palette colors · 0 invented</span>
+    </footer>
+  </main>
+</div>
+
+<script>
+(function(){
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---- Masthead spectrum: the palette as a level meter ---- */
+  var PAL = [
+    {v:'#0000FF', n:'Blue',   role:'Decorative only',      use:'Gradient partner in the masthead spectrum. Never text, never a border, never a state.', r:'2.3:1 — fails'},
+    {v:'#83008C', n:'Purple', role:'Cloned & custom',      use:'Marks voices that came from an uploaded sample, and inline markup chips inside a script.', r:'6.3:1 as a fill with Paper text'},
+    {v:'#C95D00', n:'Burnt',  role:'Refusal & limits',     use:'Over character limit, failed render, non-commercial license, destructive actions.', r:'4.7:1 on Ink'},
+    {v:'#006795', n:'Teal',   role:'Signal & information', use:'Unplayed-to-played waveform, queued state, neutral informational accents.', r:'3.2:1 — large text or fills'},
+    {v:'#9EB600', n:'Olive',  role:'Live speech & focus',  use:'The word being spoken, the playhead, and every keyboard focus ring in the product.', r:'8.6:1 on Ink'},
+    {v:'#C98500', n:'Amber',  role:'Work in progress',     use:'Rendering, queued, warming a cold GPU. Always a state that ends on its own.', r:'6.4:1 on Ink'},
+    {v:'#009044', n:'Green',  role:'Permission & done',    use:'Render complete, commercial-safe license, enabled toggles.', r:'4.8:1 on Ink'},
+    {v:'#D5D5F4', n:'Paper',  role:'Text & light base',    use:'All body text on Ink, and the canvas of the print/light theme.', r:'13.7:1 on Ink'},
+    {v:'#4A4AC8', n:'Indigo', role:'Primary action',       use:'The render button, selected voice cards, slider fills. One per view.', r:'4.7:1 as a fill with Paper text'},
+    {v:'#00003E', n:'Ink',    role:'Canvas',               use:'The base surface everywhere, and the text color on any bright fill.', r:'base'}
+  ];
+  var spec = document.getElementById('spectrum');
+  var heights = [46,62,80,58,100,72,54,88,66,40];
+  PAL.forEach(function(c,i){
+    var b = document.createElement('i');
+    b.style.background = c.v;
+    b.style.height = heights[i] + '%';
+    b.style.animationDelay = (i*0.16) + 's';
+    if(reduce) b.style.animation = 'none';
+    spec.appendChild(b);
+  });
+
+  /* ---- Swatch cards ---- */
+  var sws = document.getElementById('swatches');
+  PAL.forEach(function(c,i){
+    var el = document.createElement('div');
+    el.className = 'sw';
+    el.innerHTML =
+      '<div class="chip" style="background:'+c.v+'"><span>'+c.v+'</span></div>'+
+      '<div class="body"><dl style="margin:0"><dt>'+String(i+1).padStart(2,'0')+' · '+c.n+' — '+c.role+'</dt>'+
+      '<dd>'+c.use+'</dd></dl><div class="ratio">'+c.r+'</div></div>';
+    sws.appendChild(el);
+  });
+
+  /* ---- Surface ladder ---- */
+  var SURF = [
+    ['--canvas','Canvas','Ink, unmixed. The page itself.'],
+    ['--surface-1','Surface 1','92% Ink · 8% Paper. Cards, panels, the rail.'],
+    ['--surface-2','Surface 2','85% Ink · 15% Paper. Inputs and inset areas.'],
+    ['--surface-3','Surface 3','78% Ink · 22% Paper. Toggle tracks, hover fills.']
+  ];
+  var sd = document.getElementById('surfaceDemo');
+  SURF.forEach(function(s){
+    var d = document.createElement('div');
+    d.className='frame';
+    d.style.background='var('+s[0]+')';
+    d.innerHTML = '<div class="t-label" style="margin-bottom:6px">'+s[0]+'</div><div class="t-head">'+s[1]+'</div><p class="note" style="margin:4px 0 0">'+s[2]+'</p>';
+    sd.appendChild(d);
+  });
+
+  /* ---- Space scale ---- */
+  var sp = document.getElementById('spaceDemo');
+  [4,8,12,16,24,32,48,72].forEach(function(n){
+    var d=document.createElement('div');
+    d.style.cssText='text-align:center';
+    d.innerHTML='<div style="width:'+n+'px;height:'+n+'px;background:var(--p9-indigo);border-radius:2px;margin:0 auto 6px"></div><span class="t-data" style="color:var(--text-faint);font-size:11px">'+n+'</span>';
+    sp.appendChild(d);
+  });
+
+  /* ---- Voice cards ---- */
+  var VOICES = [
+    {n:'Ash', m:'Chatterbox · MIT', badge:'ready', bl:'Commercial-safe', note:'Dry, mid-range, good for narration.', s:1},
+    {n:'Marrow', m:'Cloned · 42 s sample', badge:'cloned', bl:'Cloned voice', note:'Built from your uploaded reference.', s:2},
+    {n:'Vellum', m:'Qwen3-TTS · Apache 2.0', badge:'ready', bl:'Commercial-safe', note:'Multilingual, even pacing.', s:3},
+    {n:'Cinder', m:'EchoTTS · CC-BY-NC-SA', badge:'limit', bl:'Non-commercial', note:'Warmest of the set. Demos only.', s:4}
+  ];
+  var vg = document.getElementById('voiceGrid');
+  VOICES.forEach(function(v,idx){
+    var btn = document.createElement('button');
+    btn.className='voice';
+    btn.type='button';
+    btn.setAttribute('aria-pressed', idx===1 ? 'true':'false');
+    var bars='';
+    for(var i=0;i<26;i++){
+      var h = 5 + Math.abs(Math.sin((i+v.s*3)*0.9))*20;
+      bars += '<i style="height:'+h.toFixed(1)+'px"></i>';
+    }
+    btn.innerHTML =
+      '<div class="voice-top"><div><div class="voice-name">'+v.n+'</div><div class="voice-model">'+v.m+'</div></div>'+
+      '<span class="badge badge--'+v.badge+'">'+v.bl+'</span></div>'+
+      '<div class="mini-wave" aria-hidden="true">'+bars+'</div>'+
+      '<p class="note" style="margin:0">'+v.note+'</p>';
+    btn.addEventListener('click', function(){
+      vg.querySelectorAll('.voice').forEach(function(b){ b.setAttribute('aria-pressed','false'); });
+      btn.setAttribute('aria-pressed','true');
+    });
+    vg.appendChild(btn);
+  });
+
+  /* ---- Ranges ---- */
+  function bindRange(id, out, fmt){
+    var r=document.getElementById(id), o=document.getElementById(out);
+    function upd(){
+      var pct = (r.value - r.min) / (r.max - r.min) * 100;
+      r.style.setProperty('--fill', pct+'%');
+      o.textContent = fmt(r.value);
+    }
+    r.addEventListener('input', upd); upd();
+  }
+  bindRange('rate','rateOut',function(v){return (+v).toFixed(2)+'×'});
+  bindRange('pitch','pitchOut',function(v){return (v>0?'+':'')+v+' st'});
+  bindRange('temp','tempOut',function(v){return (+v).toFixed(2)});
+
+  /* ---- Signature: the spoken line ---- */
+  var LINE = "Welcome back. Your last render finished while you were away — twenty-two seconds of audio, ready to download. Nothing was lost.";
+  var scriptEl = document.getElementById('script');
+  var words = LINE.split(' ');
+  words.forEach(function(w,i){
+    var s=document.createElement('w'); s.textContent=w; s.dataset.i=i; scriptEl.appendChild(s);
+    scriptEl.appendChild(document.createTextNode(' '));
+  });
+
+  var waveEl = document.getElementById('wave');
+  var BARS = 84;
+  for(var i=0;i<BARS;i++){
+    var b=document.createElement('i');
+    var env = Math.sin((i/BARS)*Math.PI);
+    var h = 6 + (Math.abs(Math.sin(i*1.7)) * 0.6 + Math.abs(Math.sin(i*0.43)) * 0.4) * 42 * (0.35 + env*0.65);
+    b.style.height = h.toFixed(1)+'px';
+    waveEl.appendChild(b);
+  }
+  var bars = waveEl.querySelectorAll('i');
+  var wordEls = scriptEl.querySelectorAll('w');
+  var DUR = 6.0, t = 0, timer = null, playing = false;
+  var timeEl = document.getElementById('time');
+  var playBtn = document.getElementById('playBtn');
+  var playIcon = document.getElementById('playIcon');
+
+  function paint(){
+    var p = t / DUR;
+    var edge = Math.floor(p * BARS);
+    for(var i=0;i<BARS;i++){
+      bars[i].className = i < edge ? 'past' : (i === edge && playing ? 'now' : '');
+    }
+    var wi = Math.floor(p * wordEls.length);
+    for(var j=0;j<wordEls.length;j++){
+      wordEls[j].className = j < wi ? 'said' : (j === wi && playing ? 'now' : '');
+    }
+    timeEl.textContent = '0:0' + Math.min(5, Math.floor(t)) + ' / 0:06';
+  }
+  function stop(){
+    playing=false; clearInterval(timer);
+    playIcon.innerHTML = '<path d="M3 2l10 5.5L3 13z"/>';
+    playBtn.setAttribute('aria-label','Play preview');
+    paint();
+  }
+  playBtn.addEventListener('click', function(){
+    if(playing){ stop(); return; }
+    playing = true;
+    playIcon.innerHTML = '<rect x="3" y="2.5" width="3.5" height="10"/><rect x="8.5" y="2.5" width="3.5" height="10"/>';
+    playBtn.setAttribute('aria-label','Pause preview');
+    if(t >= DUR) t = 0;
+    var step = reduce ? 0.25 : 0.06;
+    timer = setInterval(function(){
+      t += step;
+      if(t >= DUR){ t = DUR; paint(); stop(); return; }
+      paint();
+    }, reduce ? 250 : 60);
+  });
+  paint();
+
+  /* ---- Scroll spy ---- */
+  var links = Array.prototype.slice.call(document.querySelectorAll('#nav a'));
+  var secs = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting){
+        links.forEach(function(l){ l.classList.remove('on'); });
+        var idx = secs.indexOf(e.target);
+        if(idx > -1) links[idx].classList.add('on');
+      }
+    });
+  }, {rootMargin:'-10% 0px -75% 0px'});
+  secs.forEach(function(s){ if(s) io.observe(s); });
+})();
+</script>
+</body>
+</html>

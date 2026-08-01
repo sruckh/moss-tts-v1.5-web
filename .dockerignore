@@ -1,0 +1,22 @@
+# Keep the build context to source. Note what is NOT ignored:
+#   *.templ  — the css step scans them for class names
+#   go.mod   — obviously
+.git
+.goals
+# Credentials never belong in a build context.
+.infisical
+.env
+.outline
+.serena
+.codegraph
+.tokensave
+.claude
+node_modules
+data
+*.db
+*.db-wal
+*.db-shm
+*.wav
+# Generated inside the build, never from the host.
+internal/web/app.css
+**/*_templ.go

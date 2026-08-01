@@ -1,0 +1,81 @@
+// Package config loads runtime configuration from the environment.
+//
+// Secrets (RUNPOD_API_KEY) arrive as environment variables injected by the
+// Infisical CLI wrapper in the container entrypoint — this package never talks
+// to Infisical itself.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// RunPodEndpointEnv names the variable holding the serverless endpoint Timbre
+// renders through, e.g. https://api.runpod.ai/v2/<your-endpoint-id>.
+//
+// There is no default on purpose: the endpoint id identifies a specific paid
+// deployment, so it is supplied per environment rather than compiled in. It is
+// a server-side value either way — the browser never calls RunPod directly.
+const RunPodEndpointEnv = "RUNPOD_ENDPOINT"
+
+// Config is the fully resolved runtime configuration.
+type Config struct {
+	// Addr is the listen address. No host port is published; NGINX Proxy
+	// Manager reaches this port over the shared_net docker network.
+	Addr string
+
+	// DBPath is the SQLite file, on a volume the litestream sidecar shares.
+	DBPath string
+
+	// AudioDir holds rendered WAVs and uploaded reference samples.
+	AudioDir string
+
+	// PublicBaseURL is the Cloudflare/NPM hostname this app answers on. It is
+	// how reference audio URLs are built for RunPod's reference_url field,
+	// which RunPod's workers fetch over the public internet.
+	PublicBaseURL string
+
+	// RunPodEndpoint is the base URL for /run, /status/{id}, /health.
+	RunPodEndpoint string
+
+	// RunPodAPIKey is the bearer token. Injected by Infisical at runtime.
+	RunPodAPIKey string
+
+	// MaxInFlight caps how many jobs the worker keeps submitted at once.
+	MaxInFlight int
+}
+
+// Load reads configuration from the environment, applying defaults.
+func Load() (Config, error) {
+	cfg := Config{
+		Addr:           env("TIMBRE_ADDR", ":8080"),
+		DBPath:         env("TIMBRE_DB_PATH", "/data/timbre.db"),
+		AudioDir:       env("TIMBRE_AUDIO_DIR", "/data/audio"),
+		PublicBaseURL:  strings.TrimRight(env("TIMBRE_PUBLIC_BASE_URL", ""), "/"),
+		RunPodEndpoint: strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
+		RunPodAPIKey:   os.Getenv("RUNPOD_API_KEY"),
+	}
+
+	maxInFlight, err := strconv.Atoi(env("TIMBRE_MAX_IN_FLIGHT", "2"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TIMBRE_MAX_IN_FLIGHT: %w", err)
+	}
+	if maxInFlight < 1 {
+		return Config{}, fmt.Errorf("TIMBRE_MAX_IN_FLIGHT must be >= 1, got %d", maxInFlight)
+	}
+	cfg.MaxInFlight = maxInFlight
+
+	return cfg, nil
+}
+
+// HasRunPodKey reports whether the API key was injected, without exposing it.
+func (c Config) HasRunPodKey() bool { return c.RunPodAPIKey != "" }
+
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

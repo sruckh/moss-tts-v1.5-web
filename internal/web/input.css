@@ -1,0 +1,91 @@
+/* Timbre design tokens — Tailwind v4, CSS-first.
+ *
+ * The palette is EXHAUSTIVE: exactly the ten hexes from DESIGN.md, no others.
+ * `--color-*: initial` clears Tailwind's default palette first, so a stray
+ * `bg-red-500` cannot compile and no foreign hex can reach the built CSS.
+ * New values come only from color-mix() of two palette colors — never a new hex,
+ * never a neutral gray.
+ *
+ * Built by the Tailwind v4 CLI in the Docker build stage:
+ *   npx @tailwindcss/cli -i internal/web/input.css -o internal/web/app.css
+ */
+
+@import "tailwindcss";
+
+/* templ files are the markup source; Tailwind does not scan .templ by default. */
+@source "../../**/*.templ";
+@source "../../**/*.go";
+
+/* `static` emits every token below even when nothing references it yet. The
+ * palette is a contract, not a usage artifact: all ten belong in app.css from
+ * the first build so later work can be checked against it. */
+@theme static {
+  --color-*: initial;
+
+  /* The ten. Nothing else. */
+  --color-ink: #00003E;    /* canvas, text on bright fills */
+  --color-paper: #D5D5F4;  /* all body text */
+  --color-indigo: #4A4AC8; /* render button, selection, slider fill — one per view */
+  --color-olive: #9EB600;  /* live word, playhead, focus ring */
+  --color-teal: #006795;   /* waveform, queued, information */
+  --color-amber: #C98500;  /* rendering, warming GPU, queued work */
+  --color-green: #009044;  /* ready, commercial-safe, toggle on */
+  --color-burnt: #C95D00;  /* over limit, failed, non-commercial, delete */
+  --color-purple: #83008C; /* cloned voice, markup chips */
+  --color-blue: #0000FF;   /* masthead spectrum gradient only — never load-bearing */
+
+  /* Three faces, three jobs. */
+  --font-display: "Bricolage Grotesque", Archivo, system-ui, sans-serif;
+  --font-body: "Instrument Sans", Archivo, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+
+  /* 4px base. */
+  --spacing: 4px;
+
+  /* 4 chips / 8 controls / 14 containers / pill for transport. */
+  --radius-chip: 4px;
+  --radius-control: 8px;
+  --radius-container: 14px;
+}
+
+/* Surfaces are Ink lifted toward Paper; depth is mix ratio + a 1px line.
+ * No shadows anywhere in this system.
+ *
+ * These stay as color-mix() in the shipped CSS — the browser does the mixing.
+ * That is also why the build does not minify: the minifier folds a color-mix of
+ * two known colors into its computed hex (#8484AF and friends), which would put
+ * colors in app.css that belong to no palette and break the exhaustive-palette
+ * check. Unminified output keeps the mix intact and the ten hexes exhaustive;
+ * NPM and Cloudflare compress the response anyway. */
+@theme {
+  --color-surface-1: color-mix(in srgb, var(--color-ink) 94%, var(--color-paper));
+  --color-surface-2: color-mix(in srgb, var(--color-ink) 89%, var(--color-paper));
+  --color-surface-3: color-mix(in srgb, var(--color-ink) 84%, var(--color-paper));
+  --color-line: color-mix(in srgb, var(--color-ink) 76%, var(--color-paper));
+  --color-line-loud: color-mix(in srgb, var(--color-ink) 60%, var(--color-paper));
+  --color-text-dim: color-mix(in srgb, var(--color-paper) 62%, var(--color-ink));
+}
+
+@layer base {
+  html {
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+    font-family: var(--font-body);
+  }
+
+  /* Olive focus ring, 2px at 2px offset, on every interactive element. */
+  :focus-visible {
+    outline: 2px solid var(--color-olive);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

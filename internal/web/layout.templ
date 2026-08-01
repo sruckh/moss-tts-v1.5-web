@@ -1,0 +1,40 @@
+package web
+
+// Layout is the document shell every page renders inside: fonts, the compiled
+// Tailwind stylesheet, HTMX and Alpine. Page content goes in as children.
+//
+// Deliberately bare — the real chrome (masthead spectrum, voice library, queue)
+// is built in the UI goal against DESIGN.md and index.html.
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title }</title>
+			<link rel="preconnect" href="https://fonts.googleapis.com"/>
+			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+			<link
+				rel="stylesheet"
+				href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap"
+			/>
+			<link rel="stylesheet" href="/static/app.css"/>
+			<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+			<script src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
+		</head>
+		<body class="bg-ink text-paper font-body antialiased">
+			{ children... }
+		</body>
+	</html>
+}
+
+// Shell is the placeholder landing page: proof the template pipeline compiles
+// and the stylesheet is wired. Replaced by the real UI in a later goal.
+templ Shell() {
+	@Layout("Timbre") {
+		<main class="mx-auto max-w-2xl p-12">
+			<h1 class="font-display text-4xl font-extrabold text-paper">Timbre</h1>
+			<p class="mt-4 text-text-dim">Text to speech. Scaffold up.</p>
+		</main>
+	}
+}

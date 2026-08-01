@@ -1,0 +1,36 @@
+# Credential material — never commit any of this.
+# The real values live outside the repo (loaded by scripts/env.sh) and are
+# injected into the container at runtime by the Infisical entrypoint.
+.infisical
+.env
+.env.*
+!.env.example
+*.gpg
+*.pem
+*.key
+*credentials*
+*secret*
+
+# Build-generated. Produced inside Docker and regenerated on every build;
+# scripts/sync-generated.sh copies them out purely so gopls can resolve the tree.
+internal/web/app.css
+**/*_templ.go
+node_modules/
+
+# Runtime data — the SQLite file, its WAL, rendered audio, uploaded samples.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.wav
+
+# Local agent and tooling state. `.goals/` holds the phase-by-phase goal prompts
+# and the brief/recon they are grounded in — working notes, kept out of the
+# published repo. The plan of record lives in the Outline brain.
+.goals/
+.outline/
+.serena/
+.codegraph/
+.tokensave/
+.claude/
+CLAUDE.md

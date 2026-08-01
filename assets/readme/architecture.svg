@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="800" viewBox="0 0 1200 800"
+     role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">Timbre architecture — the browser path and the render path are separate</title>
+  <desc id="arch-desc">Three bands. Browser path: browser to Cloudflare to NGINX Proxy Manager to the Timbre Go app, every hop sub-second. Render path: a background worker POSTs to RunPod's async /run endpoint and a poller reads /status/{id} until COMPLETED, then decodes audio_base64, writes a WAV and marks the job ready. State: SQLite in WAL mode is replicated continuously by a Litestream sidecar to an S3-compatible bucket. A closing note explains that Cloudflare cuts any request at 90 seconds while a cold GPU plus inference takes minutes, so no browser request ever waits on a render.</desc>
+
+  <rect width="1200" height="800" rx="26" fill="#00003E"/>
+
+  <!-- ================= Band 1 — browser path ================= -->
+  <text x="64" y="86"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">BROWSER PATH — EVERY HOP SUB-SECOND</text>
+
+  <g id="band-browser">
+    <rect x="64" y="116" width="172" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="150" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Browser</text>
+    <text x="150" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">HTMX, polls 2s</text>
+
+    <path d="M244 158 H284" stroke="#59598F" stroke-width="2"/>
+    <path d="M284 158 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="292" y="116" width="208" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="396" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Cloudflare</text>
+    <text x="396" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C98500">TLS, 90s cap</text>
+
+    <path d="M508 158 H548" stroke="#59598F" stroke-width="2"/>
+    <path d="M548 158 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="556" y="116" width="276" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="694" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">NGINX Proxy Manager</text>
+    <text x="694" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">shared_net</text>
+
+    <path d="M840 158 H880" stroke="#59598F" stroke-width="2"/>
+    <path d="M880 158 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="888" y="116" width="248" height="84" rx="14" fill="#202059" stroke="#4A4AC8" stroke-width="2"/>
+    <text x="1012" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Timbre (Go)</text>
+    <text x="1012" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">no host ports</text>
+  </g>
+
+  <!-- ================= Band 2 — render path ================= -->
+  <text x="64" y="284"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">RENDER PATH — OUT OF BAND, TAKES MINUTES</text>
+
+  <g id="band-render">
+    <rect x="64" y="312" width="356" height="88" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="242" y="350" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Worker + poller</text>
+    <text x="242" y="378" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">goroutines, capped in-flight</text>
+
+    <!-- submit -->
+    <text x="600" y="332" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">POST /run — returns a job id</text>
+    <path d="M428 346 H772" stroke="#59598F" stroke-width="2"/>
+    <path d="M772 346 l-11 -6 v12 z" fill="#59598F"/>
+
+    <!-- poll -->
+    <path d="M772 372 H428" stroke="#59598F" stroke-width="2"/>
+    <path d="M428 372 l11 -6 v12 z" fill="#59598F"/>
+    <text x="600" y="396" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">poll GET /status/{id}</text>
+
+    <rect x="780" y="312" width="356" height="88" rx="14" fill="#202059" stroke="#C98500" stroke-width="2"/>
+    <text x="958" y="350" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">RunPod serverless</text>
+    <text x="958" y="378" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C98500">MossTTS v1.5 on GPU</text>
+
+    <!-- completion strip -->
+    <rect x="64" y="424" width="4" height="62" rx="2" fill="#009044"/>
+    <text x="92" y="462"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#D5D5F4">On COMPLETED: decode audio_base64, write the WAV, mark the job ready.</text>
+  </g>
+
+  <!-- ================= Band 3 — state ================= -->
+  <text x="64" y="558"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">STATE — ONE FILE, REPLICATED OFF-HOST</text>
+
+  <g id="band-state">
+    <rect x="64" y="586" width="300" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="214" y="622" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">SQLite (WAL)</text>
+    <text x="214" y="650" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">pure-Go driver, no CGO</text>
+
+    <path d="M372 628 H412" stroke="#59598F" stroke-width="2"/>
+    <path d="M412 628 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="420" y="586" width="300" height="84" rx="14" fill="#202059" stroke="#006795" stroke-width="2"/>
+    <text x="570" y="622" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Litestream</text>
+    <text x="570" y="650" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">sidecar, follows the WAL</text>
+
+    <path d="M728 628 H768" stroke="#59598F" stroke-width="2"/>
+    <path d="M768 628 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="776" y="586" width="360" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="956" y="622" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">S3-compatible bucket</text>
+    <text x="956" y="650" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">continuous replication</text>
+  </g>
+
+  <!-- ================= Closing note ================= -->
+  <rect x="64" y="700" width="4" height="72" rx="2" fill="#C98500"/>
+  <text x="92" y="728"
+        font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="22" fill="#8B8BB4">Cloudflare cuts a request at 90s; a cold GPU plus inference takes minutes.</text>
+  <text x="92" y="760"
+        font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="22" fill="#8B8BB4">So a render never happens inside one — the worker owns it, the UI polls.</text>
+</svg>

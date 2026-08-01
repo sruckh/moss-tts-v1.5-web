@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Timbre — a self-hosted text-to-speech studio</title>
+  <desc id="hero-desc">Dark navy banner. On the left, the name Timbre above the line "Paste a script, pick a voice, queue the render" and "Renders run out of band — nothing waits". On the right, Timbre's spoken line component: a waveform whose played bars are teal, a bright olive playhead bar, and a script line below where the word being spoken sits in dark ink on an olive block.</desc>
+
+  <!-- Ink canvas. -->
+  <rect width="1200" height="360" rx="26" fill="#00003E"/>
+
+  <!-- Masthead spectrum: the one place Blue is allowed, and nothing depends on reading it.
+       Spans x=26..1174 so it sits inside the rx=26 corners without needing a clip path. -->
+  <g id="masthead-spectrum">
+    <rect x="26"   y="0" width="143.5" height="7" fill="#4A4AC8"/>
+    <rect x="169.5" y="0" width="143.5" height="7" fill="#0000FF"/>
+    <rect x="313"  y="0" width="143.5" height="7" fill="#83008C"/>
+    <rect x="456.5" y="0" width="143.5" height="7" fill="#006795"/>
+    <rect x="600"  y="0" width="143.5" height="7" fill="#009044"/>
+    <rect x="743.5" y="0" width="143.5" height="7" fill="#9EB600"/>
+    <rect x="887"  y="0" width="143.5" height="7" fill="#C98500"/>
+    <rect x="1030.5" y="0" width="143.5" height="7" fill="#C95D00"/>
+  </g>
+
+  <g id="title-block">
+    <text x="64" y="86"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="20" letter-spacing="2.6" fill="#8B8BB4">SELF-HOSTED TTS STUDIO</text>
+
+    <text x="60" y="188"
+          font-family="Bricolage Grotesque, Archivo, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="104" font-weight="800" letter-spacing="-4" fill="#D5D5F4">Timbre</text>
+
+    <text x="64" y="240"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="25" fill="#D5D5F4">Paste a script, pick a voice, queue the render.</text>
+    <text x="64" y="274"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="25" fill="#8B8BB4">Renders run out of band — nothing waits.</text>
+
+    <text x="64" y="320"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#59598F">Go · templ · HTMX · SQLite + Litestream · RunPod · Docker</text>
+  </g>
+
+  <!-- The spoken line: waveform and script as one instrument. Timbre's signature component. -->
+  <g id="spoken-line">
+    <rect x="720" y="74" width="416" height="212" rx="14" fill="#202059" stroke="#35356C"/>
+
+    <text x="744" y="108"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="17" letter-spacing="2.2" fill="#8B8BB4">THE SPOKEN LINE</text>
+
+    <!-- Played portion: Teal. -->
+    <g fill="#006795">
+      <rect x="744" y="152" width="8" height="26" rx="4"/>
+      <rect x="759" y="142" width="8" height="46" rx="4"/>
+      <rect x="774" y="132" width="8" height="66" rx="4"/>
+      <rect x="789" y="146" width="8" height="38" rx="4"/>
+      <rect x="804" y="128" width="8" height="74" rx="4"/>
+      <rect x="819" y="138" width="8" height="54" rx="4"/>
+      <rect x="834" y="150" width="8" height="30" rx="4"/>
+      <rect x="849" y="134" width="8" height="62" rx="4"/>
+      <rect x="864" y="124" width="8" height="82" rx="4"/>
+      <rect x="879" y="140" width="8" height="50" rx="4"/>
+    </g>
+
+    <!-- Playhead: the brightest color in the palette, on the smallest element. -->
+    <rect x="894" y="116" width="8" height="98" rx="4" fill="#9EB600"/>
+
+    <!-- Unplayed portion. -->
+    <g fill="#59598F">
+      <rect x="909" y="144" width="8" height="42" rx="4"/>
+      <rect x="924" y="134" width="8" height="62" rx="4"/>
+      <rect x="939" y="148" width="8" height="34" rx="4"/>
+      <rect x="954" y="130" width="8" height="70" rx="4"/>
+      <rect x="969" y="142" width="8" height="46" rx="4"/>
+      <rect x="984" y="152" width="8" height="26" rx="4"/>
+      <rect x="999" y="136" width="8" height="58" rx="4"/>
+      <rect x="1014" y="146" width="8" height="38" rx="4"/>
+      <rect x="1029" y="128" width="8" height="74" rx="4"/>
+      <rect x="1044" y="148" width="8" height="34" rx="4"/>
+      <rect x="1059" y="140" width="8" height="50" rx="4"/>
+      <rect x="1074" y="152" width="8" height="26" rx="4"/>
+      <rect x="1089" y="142" width="8" height="46" rx="4"/>
+      <rect x="1104" y="150" width="8" height="30" rx="4"/>
+    </g>
+
+    <!-- Script below: spoken words settle to dim, the live word sits in Ink on Olive,
+         unspoken words stay Paper. Gaps are generous so font substitution cannot collide. -->
+    <text x="744" y="258"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#8B8BB4">the room</text>
+    <rect x="868" y="236" width="78" height="30" rx="4" fill="#9EB600"/>
+    <text x="879" y="258"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#00003E">quiet</text>
+    <text x="962" y="258"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#D5D5F4">again</text>
+  </g>
+</svg>
