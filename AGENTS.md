@@ -26,13 +26,23 @@ reference, rendered in itself.
 - **No published ports.** The app is reachable only on the external
   `shared_net` network, where NGINX Proxy Manager forwards a public hostname to
   it and Cloudflare terminates TLS. Never add a `ports:` mapping.
-- **The public URL comes from `TIMBRE_PUBLIC_BASE_URL`** (Cloudflare → NPM →
-  `timbre-app:8080`), set in the git-ignored `.env` — see `.env.example`. There
-  is no default, and no deployment hostname is committed. This is not cosmetic:
-  RunPod's workers fetch
-  `reference_url` themselves, so uploaded reference audio must be served from
-  this hostname — a container-internal or localhost URL will silently fail at
-  render time. Build those URLs from the config value, never hard-code them.
+- **Reference audio is delivered to RunPod as base64 inline, not a public URL.**
+  Uploaded samples are stored as blobs and base64-encoded into the RunPod
+  submission payload by the worker (confirmed working from testing). There is no
+  `/refs/*` route and no `TIMBRE_PUBLIC_BASE_URL`; reference audio never traverses
+  Cloudflare → NPM → container. The public hostname (Cloudflare → NPM →
+  `timbre-app:8080`, git-ignored `.env`, no default committed) serves only the
+  browser UI — nothing about reference audio depends on it.
+- **The voice library lives in `internal/voices`.** `internal/voices.Store` owns
+  the `voices` table and the reference-audio blobs on the `TIMBRE_AUDIO_DIR`
+  volume (`refs/<rand>.<ext>`). On startup it seeds three stock voices
+  (Chatterbox/MIT, Qwen3-TTS/Apache-2.0, Higgs Audio v2/Apache-2.0) idempotently.
+  The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
+  `POST /voices/upload` accepts an authenticated multipart file (validated by
+  extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row, and
+  returns the refreshed grid fragment. Both routes are auth-gated — only
+  `/login`, `/healthz`, `/static/*` are exempt. `Store.ReferenceBytes` reads the
+  blob back for Goals 4–5's inline base64 submission.
 - **No request blocks longer than ~90s** (Cloudflare's cap). The browser talks
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.
@@ -41,11 +51,11 @@ reference, rendered in itself.
   password hashes, a startup bootstrap that seeds the first admin from
   `ADMIN_USERNAME`/`ADMIN_PASSWORD` (Infisical, next to `RUNPOD_API_KEY`) when
   the users table is empty, and SQLite-backed gorilla/sessions with a signed
-  session-ID cookie (`HttpOnly`, `SameSite=Lax`, `Secure` when the public URL
-  is HTTPS; `TIMBRE_SESSION_SECRET` keys the HMAC, also from Infisical). The
+  session-ID cookie (`HttpOnly`, `SameSite=Lax`, `Secure` when served behind HTTPS (gated by an explicit
+  `TIMBRE_SECURE_COOKIES` env; the former `TIMBRE_PUBLIC_BASE_URL` signal is
+  removed — see Goal 3); `TIMBRE_SESSION_SECRET` keys the HMAC, also from Infisical). The
   middleware's public exempt list is defined once in `auth.Exempt` — `/login`,
-  `/healthz`, `/static/*`, and `/refs/*` (the public reference-audio route,
-  Goal 3). Everything else 302s to `/login` (401 for HTMX/JSON).
+  `/healthz`, `/static/*`. Everything else 302s to `/login` (401 for HTMX/JSON).
 - **The palette is exhaustive**: exactly the ten hexes in `DESIGN.md`. New
   values only ever come from `color-mix()` of two of them.
 

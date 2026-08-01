@@ -25,7 +25,6 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadTrimsTrailingSlashes(t *testing.T) {
 	t.Setenv("RUNPOD_ENDPOINT", "https://api.runpod.ai/v2/abc/")
-	t.Setenv("TIMBRE_PUBLIC_BASE_URL", "https://timbre.example.com/")
 
 	cfg, err := Load()
 	if err != nil {
@@ -34,8 +33,26 @@ func TestLoadTrimsTrailingSlashes(t *testing.T) {
 	if cfg.RunPodEndpoint != "https://api.runpod.ai/v2/abc" {
 		t.Errorf("RunPodEndpoint = %q", cfg.RunPodEndpoint)
 	}
-	if cfg.PublicBaseURL != "https://timbre.example.com" {
-		t.Errorf("PublicBaseURL = %q", cfg.PublicBaseURL)
+}
+
+func TestSecureCookiesOptIn(t *testing.T) {
+	// Defaults to off — local HTTP testing must keep the cookie usable.
+	t.Setenv(SecureCookiesEnv, "")
+	if (Config{}).SecureCookies() {
+		t.Error("SecureCookies = true with no env, want false")
+	}
+
+	for _, val := range []string{"true", "1", "yes", "on", "TRUE"} {
+		t.Setenv(SecureCookiesEnv, val)
+		if !(Config{}).SecureCookies() {
+			t.Errorf("SecureCookies(%q) = false, want true", val)
+		}
+	}
+	for _, val := range []string{"", "false", "0", "no", "off", "maybe"} {
+		t.Setenv(SecureCookiesEnv, val)
+		if (Config{}).SecureCookies() {
+			t.Errorf("SecureCookies(%q) = true, want false", val)
+		}
 	}
 }
 

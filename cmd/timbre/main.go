@@ -15,6 +15,7 @@ import (
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
 	"github.com/sruckh/timbre/internal/server"
+	"github.com/sruckh/timbre/internal/voices"
 )
 
 func main() {
@@ -69,9 +70,15 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	voiceStore := voices.NewStore(handle, cfg.AudioDir)
+	if err := voiceStore.SeedStock(ctx); err != nil {
+		return err
+	}
+	log.Info("voice library ready", "stock_seed", "done")
+
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(cfg, handle, authManager),
+		Handler:           server.New(cfg, handle, authManager, voiceStore),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Generous but finite: every browser-facing request is sub-second,
 		// and uploads of reference audio are the only large bodies.

@@ -63,14 +63,13 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS voices (
-	id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-	kind                 TEXT    NOT NULL CHECK (kind IN ('stock','cloned')),
-	name                 TEXT    NOT NULL,
-	model                TEXT,
-	license_label        TEXT,
-	reference_path       TEXT,
-	reference_public_url TEXT,
-	created_at           TEXT    NOT NULL DEFAULT (datetime('now'))
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind           TEXT    NOT NULL CHECK (kind IN ('stock','cloned')),
+	name           TEXT    NOT NULL,
+	model          TEXT,
+	license_label  TEXT,
+	reference_path TEXT,
+	created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -98,10 +97,36 @@ CREATE INDEX IF NOT EXISTS jobs_user_created_idx   ON jobs (user_id, created_at 
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_runpod_id_idx ON jobs (runpod_id) WHERE runpod_id IS NOT NULL;
 `
 
-// Migrate creates the schema if it is not already present.
+// Migrate creates the schema if it is not already present. It also drops the
+// vestigial voices.reference_public_url column carried over from Goal 2's
+// public-URL reference design — Goal 3 stores reference bytes on a volume and
+// base64-encodes them inline, so the column is unused. On a fresh database the
+// drop is a no-op.
 func Migrate(ctx context.Context, handle *sql.DB) error {
 	if _, err := handle.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := dropColumnIfPresent(ctx, handle, "voices", "reference_public_url"); err != nil {
+		return fmt.Errorf("migrate: drop reference_public_url: %w", err)
+	}
+	return nil
+}
+
+// dropColumnIfPresent removes column from table when it exists. table and
+// column are compile-time constants here (never caller input), so interpolating
+// them into the DDL statement is safe.
+func dropColumnIfPresent(ctx context.Context, handle *sql.DB, table, column string) error {
+	var count int
+	if err := handle.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	if count == 0 {
+		return nil
+	}
+	if _, err := handle.ExecContext(ctx,
+		fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, table, column)); err != nil {
+		return fmt.Errorf("drop %s.%s: %w", table, column, err)
 	}
 	return nil
 }

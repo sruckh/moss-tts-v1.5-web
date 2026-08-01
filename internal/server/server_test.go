@@ -15,6 +15,7 @@ import (
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
+	"github.com/sruckh/timbre/internal/voices"
 )
 
 const testPassword = "correct horse battery staple"
@@ -40,7 +41,16 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("auth.Bootstrap: %v", err)
 	}
 
-	return New(config.Config{RunPodEndpoint: "https://api.runpod.ai/v2/test-endpoint"}, handle, mgr)
+	cfg := config.Config{
+		RunPodEndpoint: "https://api.runpod.ai/v2/test-endpoint",
+		AudioDir:       t.TempDir(),
+	}
+	voiceStore := voices.NewStore(handle, cfg.AudioDir)
+	if err := voiceStore.SeedStock(context.Background()); err != nil {
+		t.Fatalf("voices.SeedStock: %v", err)
+	}
+
+	return New(cfg, handle, mgr, voiceStore)
 }
 
 // login posts valid credentials and returns the issued session cookie.

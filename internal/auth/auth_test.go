@@ -170,10 +170,13 @@ func TestExemptList(t *testing.T) {
 		"/login":          true,
 		"/healthz":        true,
 		"/static/app.css": true,
-		"/refs/abc.wav":   true, // Goal 3's public reference-audio route
-		"/":               false,
-		"/logout":         false,
-		"/jobs":           false,
+		// Reference audio is delivered base64-inline, never served over HTTP —
+		// no route is exempt for it.
+		"/refs/abc.wav": false,
+		"/voices":       false,
+		"/":             false,
+		"/logout":       false,
+		"/jobs":         false,
 	} {
 		if got := auth.Exempt(path); got != want {
 			t.Errorf("Exempt(%q) = %v, want %v", path, got, want)
@@ -223,7 +226,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("exempt paths pass through", func(t *testing.T) {
-		for _, path := range []string{"/login", "/healthz", "/static/app.css", "/refs/x.wav"} {
+		for _, path := range []string{"/login", "/healthz", "/static/app.css"} {
 			rec := httptest.NewRecorder()
 			protected.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 			if rec.Code != http.StatusOK {

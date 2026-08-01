@@ -16,20 +16,22 @@ import (
 
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
+	"github.com/sruckh/timbre/internal/voices"
 	"github.com/sruckh/timbre/internal/web"
 )
 
 // Server holds the dependencies shared by every handler.
 type Server struct {
-	cfg    config.Config
-	db     *sql.DB
-	auth   *auth.Manager
-	router chi.Router
+	cfg     config.Config
+	db      *sql.DB
+	auth    *auth.Manager
+	voices  *voices.Store
+	router  chi.Router
 }
 
-// New builds the router. Voices and the job queue land in later goals.
-func New(cfg config.Config, database *sql.DB, authManager *auth.Manager) *Server {
-	srv := &Server{cfg: cfg, db: database, auth: authManager, router: chi.NewRouter()}
+// New builds the router. The job queue lands in later goals.
+func New(cfg config.Config, database *sql.DB, authManager *auth.Manager, voiceStore *voices.Store) *Server {
+	srv := &Server{cfg: cfg, db: database, auth: authManager, voices: voiceStore, router: chi.NewRouter()}
 	srv.routes()
 	return srv
 }
@@ -49,6 +51,8 @@ func (s *Server) routes() {
 	s.router.Post("/logout", s.handleLogout)
 	s.router.Handle("/static/*", http.StripPrefix("/static/",
 		http.FileServer(http.FS(web.StaticFS()))))
+	s.router.Get("/voices", s.handleVoiceLibrary)
+	s.router.Post("/voices/upload", s.handleVoiceUpload)
 	s.router.Get("/", templ.Handler(web.Shell()).ServeHTTP)
 }
 

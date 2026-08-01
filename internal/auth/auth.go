@@ -191,9 +191,10 @@ var exemptExact = map[string]bool{
 }
 
 // exemptPrefixes lists the only path prefixes reachable without a session:
-// static assets (the login page needs its stylesheet) and the public,
-// token-gated reference-audio route RunPod's workers fetch (Goal 3).
-var exemptPrefixes = []string{"/static/", "/refs/"}
+// static assets (the login page needs its stylesheet). Reference audio is
+// delivered to RunPod base64-inline and is never served over HTTP, so there is
+// no public reference route to exempt.
+var exemptPrefixes = []string{"/static/"}
 
 // Exempt reports whether path is reachable without a session. This is the one
 // place the public surface is defined — anything not listed here requires

@@ -89,3 +89,18 @@
     }
   }
 }
+
+/* Voice-library component states. Kept as CSS (not utilities) because they are
+ * a single attribute's state, expressed as a color-mix of two palette colors —
+ * exactly the "selection = Indigo border + 12% wash" contract in DESIGN.md §4.
+ * The rest of the card is utility classes in voices.templ. */
+.voice-card[aria-pressed="true"] {
+  border-color: var(--color-indigo);
+  background-color: color-mix(in srgb, var(--color-indigo) 12%, var(--color-ink));
+}
+
+/* Drag-over highlight on the upload dropzone: Indigo border + 10% wash. */
+.voice-drop--over {
+  border-color: var(--color-indigo);
+  background-color: color-mix(in srgb, var(--color-indigo) 10%, var(--color-ink));
+}

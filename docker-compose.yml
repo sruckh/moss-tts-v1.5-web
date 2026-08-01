@@ -19,10 +19,11 @@ services:
       TIMBRE_ADDR: ":8080"
       TIMBRE_DB_PATH: /data/timbre.db
       TIMBRE_AUDIO_DIR: /data/audio
-      # The Cloudflare hostname this app answers on. Reference-audio URLs are
-      # built from it, because RunPod's workers fetch reference_url themselves —
-      # so this must be the externally reachable name, not the container's.
-      TIMBRE_PUBLIC_BASE_URL: ${TIMBRE_PUBLIC_BASE_URL:-}
+      # Reference audio is delivered to RunPod base64-inline and never served
+      # over HTTP, so there is no public reference hostname. This only signals
+      # whether session cookies carry the Secure flag (set true behind HTTPS /
+      # Cloudflare; leave false for local HTTP).
+      TIMBRE_SECURE_COOKIES: ${TIMBRE_SECURE_COOKIES:-false}
       # Server-side config, never a URL the browser is given.
       RUNPOD_ENDPOINT: ${RUNPOD_ENDPOINT:-}
       # Dev fallback for the three auth secrets. In deployment they come from

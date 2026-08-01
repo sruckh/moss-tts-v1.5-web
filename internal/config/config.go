@@ -12,6 +12,16 @@ import (
 	"strings"
 )
 
+// SecureCookiesEnv names the variable that opts session cookies into the
+// Secure flag. Set it to a truthy value ("true", "1", "yes", "on") in
+// deployment behind Cloudflare/NPM where TLS is terminated upstream; leave it
+// unset for local HTTP testing so the browser actually sends the cookie.
+//
+// This is an explicit opt-in: reference audio is delivered to RunPod base64
+// inline (never a public URL), so there is no public hostname to infer "https"
+// from anymore.
+const SecureCookiesEnv = "TIMBRE_SECURE_COOKIES"
+
 // RunPodEndpointEnv names the variable holding the serverless endpoint Timbre
 // renders through, e.g. https://api.runpod.ai/v2/<your-endpoint-id>.
 //
@@ -31,11 +41,6 @@ type Config struct {
 
 	// AudioDir holds rendered WAVs and uploaded reference samples.
 	AudioDir string
-
-	// PublicBaseURL is the Cloudflare/NPM hostname this app answers on. It is
-	// how reference audio URLs are built for RunPod's reference_url field,
-	// which RunPod's workers fetch over the public internet.
-	PublicBaseURL string
 
 	// RunPodEndpoint is the base URL for /run, /status/{id}, /health.
 	RunPodEndpoint string
@@ -64,7 +69,6 @@ func Load() (Config, error) {
 		Addr:           env("TIMBRE_ADDR", ":8080"),
 		DBPath:         env("TIMBRE_DB_PATH", "/data/timbre.db"),
 		AudioDir:       env("TIMBRE_AUDIO_DIR", "/data/audio"),
-		PublicBaseURL:  strings.TrimRight(env("TIMBRE_PUBLIC_BASE_URL", ""), "/"),
 		RunPodEndpoint: strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
 		RunPodAPIKey:   os.Getenv("RUNPOD_API_KEY"),
 		AdminUsername:  os.Getenv("ADMIN_USERNAME"),
@@ -87,11 +91,12 @@ func Load() (Config, error) {
 // HasRunPodKey reports whether the API key was injected, without exposing it.
 func (c Config) HasRunPodKey() bool { return c.RunPodAPIKey != "" }
 
-// SecureCookies reports whether session cookies should carry the Secure flag:
-// true whenever the public base URL is HTTPS, i.e. in deployment where
-// Cloudflare terminates TLS. Local HTTP testing keeps it false.
+// SecureCookies reports whether session cookies should carry the Secure flag.
+// It is an explicit opt-in via TIMBRE_SECURE_COOKIES rather than inferred from
+// a public URL: reference audio is sent to RunPod base64-inline, so nothing
+// about the app needs a public hostname to function.
 func (c Config) SecureCookies() bool {
-	return strings.HasPrefix(c.PublicBaseURL, "https://")
+	return envBool(SecureCookiesEnv)
 }
 
 func env(key, fallback string) string {
@@ -99,4 +104,14 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envBool reads a truthy environment variable ("1", "true", "yes", "on",
+// case-insensitive). Empty or anything else is false.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

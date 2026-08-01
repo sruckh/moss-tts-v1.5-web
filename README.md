@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets and authenticates. The studio features (voice library, queue, playback) are not written yet. [What works today](#what-works-today) is exact.
+> **Status: early.** The skeleton is deployed and the whole UI is gated behind login — it serves, migrates, replicates, injects secrets, authenticates, and ships a voice library (reference upload + stock voices + cards). The render queue and playback are not written yet. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -21,7 +21,7 @@ The browser only ever talks to the Go app, in sub-second hops. A background work
 Two consequences worth knowing before you read the code:
 
 - **The container publishes no ports.** It is reachable only on the `shared_net` Docker network, where NGINX Proxy Manager forwards a hostname to it and Cloudflare terminates TLS.
-- **Reference audio needs a public URL.** RunPod's one-shot voice cloning takes `reference_url` — a URL its own workers fetch — so uploaded samples must be served from the public hostname, not an internal one.
+- **Reference audio is sent inline, not via a URL.** The user uploads a sample (drag/drop or file picker); the worker base64-encodes it into the RunPod submission. It is never served from a public URL.
 
 ## What works today
 
@@ -32,12 +32,12 @@ Two consequences worth knowing before you read the code:
 | ✅ Litestream sidecar replicating to an S3-compatible bucket | Continuous |
 | ✅ Secrets injected from Infisical at container start | No secrets in the repo |
 | ✅ Multi-stage Docker build — templ + Tailwind + `go build`, no host toolchain | `docker compose` only |
-| ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*`, `/refs/*` requires auth | Done |
-| ⬜ Reference upload, public reference route, voice library | Not started |
+| ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*` requires auth | Done |
+| ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock-voice seed (Chatterbox · MIT, Qwen3-TTS · Apache-2.0, Higgs Audio v2 · Apache-2.0), `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
 | ⬜ Job queue, RunPod submission, polling, download, delete | Not started |
 | ⬜ The studio UI | Not started |
 
-The `jobs` table and the RunPod endpoint config already exist; the worker that uses them does not.
+The `jobs` table, the RunPod endpoint config and the voice library already exist; the worker that submits renders to RunPod does not.
 
 ## Quick start
 
@@ -59,7 +59,7 @@ docker compose exec app wget -qO- http://localhost:8080/healthz
 # => {"ok":true}
 ```
 
-On first boot the app seeds the admin user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (injected by Infisical, or `.env` when running without it) and logs `admin user created` — never the password. Every page except `/login`, `/healthz`, `/static/*` and `/refs/*` then redirects to `/login` until you sign in.
+On first boot the app seeds the admin user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (injected by Infisical, or `.env` when running without it) and logs `admin user created` — never the password. Every page except `/login`, `/healthz`, `/static/*` then redirects to `/login` until you sign in.
 
 Run the tests:
 
@@ -80,7 +80,7 @@ Read from the environment at startup:
 | `TIMBRE_ADDR` | `:8080` | Listen address. Not published to the host. |
 | `TIMBRE_DB_PATH` | `/data/timbre.db` | SQLite file, on the volume Litestream shares. |
 | `TIMBRE_AUDIO_DIR` | `/data/audio` | Rendered WAVs and uploaded reference samples. |
-| `TIMBRE_PUBLIC_BASE_URL` | — | Public hostname, e.g. `https://timbre.example.com`. Reference URLs are built from it, so it must be the externally reachable name. |
+| `TIMBRE_SECURE_COOKIES` | — | Set `true` when served behind HTTPS so session cookies carry the `Secure` flag. (Replaces the removed `TIMBRE_PUBLIC_BASE_URL`; reference audio is sent base64-inline, not via a public URL.) |
 | `RUNPOD_ENDPOINT` | — | Your endpoint, e.g. `https://api.runpod.ai/v2/your-endpoint-id`. Server-side only; never handed to the browser. |
 | `RUNPOD_API_KEY` | — | Injected by Infisical at container start. |
 | `ADMIN_USERNAME` | — | Seeds the first admin user on startup (only when the users table is empty). Injected by Infisical. |
@@ -121,8 +121,9 @@ cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
-internal/server/     chi router, login/logout, /healthz, static assets, templ shell
-internal/web/        templ layout + login page + Tailwind theme (compiled CSS is embedded)
+internal/server/     chi router, login/logout, /healthz, /voices + upload, static assets, templ shell
+internal/voices/     voice library: stock-voice seed, reference upload, blob storage + read-back
+internal/web/        templ layout + login + voice library + Tailwind theme (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 ```
