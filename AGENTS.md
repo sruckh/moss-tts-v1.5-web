@@ -33,6 +33,11 @@ reference, rendered in itself.
   Cloudflare → NPM → container. The public hostname (Cloudflare → NPM →
   `timbre-app:8080`, git-ignored `.env`, no default committed) serves only the
   browser UI — nothing about reference audio depends on it.
+  The one route that returns reference bytes is `GET /voices/{id}/reference`:
+  session-gated, `Content-Disposition: inline`, `Cache-Control: private`, 404 for
+  stock voices. It exists so a card can play what a voice was cloned from. It is
+  not a public URL and RunPod is never given a link — submission still carries
+  the bytes base64-inline.
 - **The voice library lives in `internal/voices`.** `internal/voices.Store` owns
   the `voices` table and the reference-audio blobs on the `TIMBRE_AUDIO_DIR`
   volume (`refs/<rand>.<ext>`). On startup it seeds one stock voice —
@@ -43,9 +48,14 @@ reference, rendered in itself.
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
   extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row, and
-  returns the refreshed grid fragment. Both routes are auth-gated — only
-  `/login`, `/healthz`, `/static/*` are exempt. `Store.ReferenceBytes` reads the
-  blob back for Goals 4–5's inline base64 submission.
+  returns the refreshed grid fragment; `POST /voices/{id}/name` renames a voice
+  and returns the same fragment. **Rename is clones-only** — `SeedStock`
+  reconciles stock rows *by name*, so a renamed stock row would read as stale on
+  the next boot and be deleted, taking every job's voice link with it
+  (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead. All
+  routes are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
+  `Store.ReferenceBytes` reads the blob back for Goals 4–5's inline base64
+  submission.
 - **No request blocks longer than ~90s** (Cloudflare's cap). The browser talks
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.
@@ -71,7 +81,20 @@ reference, rendered in itself.
   `output_48k`, plus `max_new_tokens`) into `params_json`, validated 400 on
   bad values. The queue's Length column and the player derive audio duration
   from the saved WAV's byte size (`audioDurations` in
-  `internal/server/jobs.go`). The frontend is templ + HTMX v4 (ESM from
+  `internal/server/jobs.go`).
+  **The queue table fits the viewport — never re-introduce a horizontal
+  scroller.** It is `table-fixed w-full` with wrapping cells and icon-only row
+  actions (the accessible name lives on `aria-label`); an `overflow-x` wrapper
+  would be reset to the left by the 2s swap anyway.
+  **A queue row is selectable and the player is not part of the polled
+  fragment.** Clicking (or Enter/Space on) a row swaps
+  `GET /jobs/{id}/player` into `#playback-body`, which sits outside `#queue`; the
+  poll sends the selected take back (`hx-vals` → `?take=`), so the server
+  re-renders the highlight on every tick. Putting the player inside `#queue`
+  would restart playback every two seconds.
+  **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
+  backfilled by `db.Migrate` for older rows). The player's model badge reads that
+  column — never a literal in a template. The frontend is templ + HTMX v4 (ESM from
   jsdelivr) + Alpine 3 + Tailwind v4; component CSS (badges, buttons, range,
   toggle, spoken line, alerts, empty states) lives in
   `internal/web/input.css`, copied to fidelity from `index.html`.

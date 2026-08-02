@@ -35,6 +35,13 @@ const MaxTextRunes = 5000
 // MaxLanguageLen bounds the optional language hint ("English", "Chinese", ...).
 const MaxLanguageLen = 64
 
+// DefaultModel names the model this rack renders with. It is recorded on every
+// job at enqueue time so a take stays attributable to what produced it — there
+// is one model today, and a WAV rendered now must still say so once there are
+// several. This is the single source for that name; the UI reads it from the
+// stored job, never from a literal.
+const DefaultModel = "MOSS-TTS v1.5"
+
 // Validation failures from Enqueue. The handler maps each to a 400 with the
 // error text, so the messages are user-facing.
 var (
@@ -65,6 +72,11 @@ type Job struct {
 	// ParamsJSON is the extra generation parameters, verbatim as stored. The
 	// worker merges it into the RunPod input object.
 	ParamsJSON string `json:"params_json,omitempty"`
+
+	// Model is the model that rendered (or will render) this take, recorded at
+	// enqueue time. Empty only for rows written before the column existed and
+	// never migrated.
+	Model string `json:"model,omitempty"`
 
 	// RunPodID is the async job id returned by POST /run. Its presence is what
 	// makes submission idempotent: a row that has one is never submitted again.
@@ -100,6 +112,10 @@ type NewJob struct {
 	Text     string
 	Language string
 
+	// Model names the model to render with. Empty means DefaultModel, which is
+	// what every caller passes today — the rack runs one model.
+	Model string
+
 	// Params is optional extra generation parameters (e.g. max_new_tokens).
 	// It is stored as JSON and passed through to RunPod at submit time.
 	Params map[string]any
@@ -130,6 +146,7 @@ const columns = `
 	SELECT j.id, j.user_id, j.status,
 	       COALESCE(j.voice_id, 0), COALESCE(v.name, ''), COALESCE(v.kind, ''),
 	       j.text, COALESCE(j.language, ''), COALESCE(j.params_json, ''),
+	       COALESCE(j.model, ''),
 	       COALESCE(j.runpod_id, ''),
 	       COALESCE(j.audio_path, ''), COALESCE(j.format, ''), COALESCE(j.sample_rate, 0),
 	       COALESCE(j.delay_ms, 0), COALESCE(j.exec_ms, 0),
@@ -171,10 +188,15 @@ func (s *Store) Enqueue(ctx context.Context, in NewJob) (int64, error) {
 		languageValue = sql.Null[string]{V: language, Valid: true}
 	}
 
+	model := strings.TrimSpace(in.Model)
+	if model == "" {
+		model = DefaultModel
+	}
+
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO jobs (user_id, voice_id, text, language, params_json, status)
-		VALUES (?, ?, ?, ?, ?, 'queued')`,
-		in.UserID, in.VoiceID, text, languageValue, params)
+		INSERT INTO jobs (user_id, voice_id, text, language, params_json, model, status)
+		VALUES (?, ?, ?, ?, ?, ?, 'queued')`,
+		in.UserID, in.VoiceID, text, languageValue, params, model)
 	if err != nil {
 		return 0, fmt.Errorf("enqueue job: %w", err)
 	}
@@ -307,7 +329,6 @@ func (s *Store) NoteAttempt(ctx context.Context, id int64, reason string) error 
 	return nil
 }
 
-
 // ListPendingRunPod returns up to limit jobs that are in submitted or in_progress status
 // and have a RunPod async job ID.
 func (s *Store) ListPendingRunPod(ctx context.Context, limit int) ([]Job, error) {
@@ -394,6 +415,7 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		if err := rows.Scan(&j.ID, &j.UserID, &j.Status,
 			&j.VoiceID, &j.VoiceName, &j.VoiceKind,
 			&j.Text, &j.Language, &j.ParamsJSON,
+			&j.Model,
 			&j.RunPodID,
 			&j.AudioPath, &j.Format, &j.SampleRate,
 			&j.DelayMS, &j.ExecMS,

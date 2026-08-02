@@ -129,6 +129,10 @@
 .btn--danger{background:transparent;border-color:var(--color-burnt);color:var(--color-burnt)}
 .btn--danger:hover{background:color-mix(in srgb, var(--color-burnt) 16%, var(--color-ink));color:var(--color-paper)}
 .btn--sm{font-size:12.5px;padding:6px 11px}
+/* Icon-only action: the accessible name lives on aria-label, so the control
+ * costs a square instead of a phrase — which is what keeps the queue table
+ * inside the viewport. Declared after the variants above so its padding wins. */
+.btn--icon{padding:6px;width:30px;height:30px;justify-content:center;gap:0;flex:none}
 .btn[disabled]{opacity:.4;cursor:not-allowed}
 
 /* ---------- Badges — one component, two axes; word + color ---------- */
@@ -140,6 +144,11 @@
 .badge--queued{background:color-mix(in srgb, var(--color-teal) 20%, var(--color-ink));color:color-mix(in srgb, var(--color-teal) 62%, var(--color-paper));border-color:color-mix(in srgb, var(--color-teal) 55%, transparent)}
 .badge--cloned{background:color-mix(in srgb, var(--color-purple) 22%, var(--color-ink));color:color-mix(in srgb, var(--color-purple) 45%, var(--color-paper));border-color:color-mix(in srgb, var(--color-purple) 60%, transparent)}
 .badge--live{background:color-mix(in srgb, var(--color-olive) 14%, var(--color-ink));color:var(--color-olive);border-color:color-mix(in srgb, var(--color-olive) 45%, transparent)}
+/* Selection badge — Indigo, the same language a selected voice card speaks. */
+.badge--selected{background:color-mix(in srgb, var(--color-indigo) 26%, var(--color-ink));color:color-mix(in srgb, var(--color-indigo) 35%, var(--color-paper));border-color:color-mix(in srgb, var(--color-indigo) 65%, transparent)}
+/* Informational badge (the model a take was rendered with). Teal is this
+ * system's "information" role — it makes no state or safety claim. */
+.badge--info{background:color-mix(in srgb, var(--color-teal) 20%, var(--color-ink));color:color-mix(in srgb, var(--color-teal) 62%, var(--color-paper));border-color:color-mix(in srgb, var(--color-teal) 55%, transparent)}
 
 /* ---------- Fields ---------- */
 .input{width:100%;background:var(--color-surface-2);border:1px solid var(--color-line);color:var(--color-paper);border-radius:var(--radius-control);padding:10px 12px;font-family:var(--font-body);font-size:14px}
@@ -205,7 +214,30 @@ select.input{appearance:none;background-image:linear-gradient(45deg,transparent 
 .queue-table{width:100%;border-collapse:collapse;font-size:13.5px}
 .queue-table th{font-family:var(--font-mono);font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--color-text-faint);text-align:left;font-weight:400;padding:0 12px 8px}
 .queue-table td{padding:12px;border-top:1px solid var(--color-line);vertical-align:middle}
-.queue-table td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;color:var(--color-text-dim)}
+/* Measurements never wrap: "4.1 s" breaking after the number so the unit lands
+ * on its own line reads as a mistake. Take is the column that gives up width —
+ * its excerpt wraps happily. */
+.queue-table td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;color:var(--color-text-dim);white-space:nowrap}
+/* A row is the target: clicking one puts that take in the player. Selection is
+ * the same Indigo language a selected voice card uses, said loudly enough to be
+ * unmistakable at a glance: an Indigo wash, an Indigo band top and bottom, a
+ * 4px Indigo marker down the leading edge, and the "In the player" chip below.
+ * The leading edge is an inset marker rather than a border so selecting a row
+ * cannot shift the text in it. Hover yields to selection rather than competing
+ * with it. */
+.queue-row{cursor:pointer}
+.queue-row td{transition:background .14s ease,border-color .14s ease}
+.queue-row:not(.is-selected):hover td{background:var(--color-surface-2)}
+.queue-row.is-selected td{background:color-mix(in srgb, var(--color-indigo) 24%, var(--color-ink));border-top-color:var(--color-indigo)}
+.queue-row.is-selected td:first-child{box-shadow:inset 4px 0 0 0 var(--color-indigo)}
+.queue-row.is-selected + .queue-row td{border-top-color:var(--color-indigo)}
+
+/* The selection chip ships on every row and is revealed by the class alone, so
+ * the word and the wash can never disagree — including on a swap whose response
+ * was rendered without the selection. Color is the second signal; the word
+ * carries the meaning. */
+.queue-mark{display:none}
+.queue-row.is-selected .queue-mark{display:inline-flex}
 
 /* ---------- Messages — status colors, 3px left border, 16% tint ---------- */
 .alert{display:flex;gap:12px;padding:12px 16px;border-radius:var(--radius-control);border-left:3px solid var(--color-line-loud);background:var(--color-surface-2);font-size:13.5px}

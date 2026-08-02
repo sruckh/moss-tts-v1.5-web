@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	text        TEXT    NOT NULL,
 	language    TEXT,
 	params_json TEXT,
+	model       TEXT,
 	status      TEXT    NOT NULL DEFAULT 'queued'
 	            CHECK (status IN ('queued','submitted','in_progress','ready','failed')),
 	runpod_id   TEXT,
@@ -115,6 +116,19 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 	if err := addColumnIfMissing(ctx, handle, "jobs", "attempts",
 		"INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("migrate: add jobs.attempts: %w", err)
+	}
+	// jobs.model records which model rendered a take, so a library of WAVs
+	// stays attributable once this rack runs more than one. Rows queued before
+	// the column existed were all rendered by the same single model, so the
+	// backfill states that rather than leaving them unattributed. The literal
+	// is deliberate: a migration must keep meaning even when jobs.DefaultModel
+	// later changes.
+	if err := addColumnIfMissing(ctx, handle, "jobs", "model", "TEXT"); err != nil {
+		return fmt.Errorf("migrate: add jobs.model: %w", err)
+	}
+	if _, err := handle.ExecContext(ctx,
+		`UPDATE jobs SET model = 'MOSS-TTS v1.5' WHERE model IS NULL OR model = ''`); err != nil {
+		return fmt.Errorf("migrate: backfill jobs.model: %w", err)
 	}
 	return nil
 }

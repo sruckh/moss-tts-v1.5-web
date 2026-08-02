@@ -70,10 +70,15 @@ func (s *Server) routes() {
 	s.router.Get("/health", s.handleRunPodHealth)
 	s.router.Get("/voices", s.handleVoiceLibrary)
 	s.router.Post("/voices/upload", s.handleVoiceUpload)
+	s.router.Post("/voices/{id}/name", s.handleVoiceRename)
+	// Session-gated preview of a stored reference clip. It is not a public URL
+	// and RunPod never sees it: submission still carries the bytes base64-inline.
+	s.router.Get("/voices/{id}/reference", s.handleVoiceReference)
 	s.router.Get("/queue", s.handleQueuePage)
 	s.router.Get("/jobs", s.handleQueue)
 	s.router.Post("/jobs", s.handleCreateJob)
 	s.router.Get("/jobs/{id}/audio", s.handleDownloadAudio)
+	s.router.Get("/jobs/{id}/player", s.handleJobPlayer)
 	s.router.Delete("/jobs/{id}", s.handleDeleteJob)
 	s.router.Get("/", s.handleStudio)
 }

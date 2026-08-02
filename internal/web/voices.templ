@@ -100,7 +100,7 @@ templ VoiceLibrary(items []voices.Voice) {
 		<section class="mt-6">
 			@VoiceGrid(items, firstVoiceID(items))
 		</section>
-		@studioHelpers()
+		@studioHelpers(0)
 	}
 }
 
@@ -126,16 +126,47 @@ templ VoiceGrid(items []voices.Voice, selectedID int64) {
 // voiceCard is one selectable voice: name, model · license, a Teal fingerprint,
 // and a license badge. The whole card is the target — selection is an
 // aria-pressed state styled by .voice-card (Indigo border + 12% Indigo wash).
+//
+// It is a div rather than a button because a clone's card carries its own
+// controls (rename, play the reference), and a button may not contain buttons.
+// role/tabindex keep it operable from the keyboard, and the nested controls
+// stop click propagation so using one never re-selects the card.
 templ voiceCard(v voices.Voice, selected bool) {
-	<button
-		type="button"
+	<div
+		role="button"
+		tabindex="0"
 		aria-pressed={ ariaPressed(selected) }
 		data-voice-id={ strconv.FormatInt(v.ID, 10) }
+		x-data="{ editing: false, ...voicePreview() }"
 		class="voice-card flex cursor-pointer flex-col gap-3 rounded-container border border-line bg-surface-1 p-4 text-left transition-colors hover:border-line-loud"
 	>
 		<div class="flex items-start justify-between gap-3">
-			<div class="min-w-0">
-				<div class="font-display text-[17px] font-semibold tracking-[-0.015em] text-paper">{ v.Name }</div>
+			<div class="min-w-0 flex-1">
+				<div class="font-display text-[17px] font-semibold tracking-[-0.015em] break-words text-paper" x-show="!editing">{ v.Name }</div>
+				if v.Kind == voices.KindCloned {
+					<form
+						x-show="editing"
+						x-cloak
+						@click.stop
+						hx-post={ "/voices/" + strconv.FormatInt(v.ID, 10) + "/name" }
+						hx-target="#voice-grid"
+						hx-swap="outerHTML"
+						class="flex flex-wrap items-center gap-2"
+					>
+						<input
+							class="input flex-1"
+							type="text"
+							name="name"
+							value={ v.Name }
+							maxlength="60"
+							required
+							aria-label="Voice name"
+							@keydown.escape.stop="editing = false"
+						/>
+						<button type="submit" class="btn btn--sm">Save name</button>
+						<button type="button" class="btn btn--quiet btn--sm" @click.stop="editing = false">Cancel</button>
+					</form>
+				}
 				<div class="mt-0.5 font-mono text-[11px] text-text-faint">{ voiceModelLine(v) }</div>
 			</div>
 			<span class={ "badge shrink-0", badgeClass(v) }>
@@ -147,7 +178,56 @@ templ voiceCard(v voices.Voice, selected bool) {
 				<span class="block w-[3px] rounded-full bg-teal" style={ "height: " + strconv.FormatFloat(h, 'f', 1, 64) + "px" }></span>
 			}
 		</div>
-	</button>
+		if v.Kind == voices.KindCloned {
+			<div class="flex flex-wrap items-center gap-1 border-t border-line pt-3">
+				<button
+					type="button"
+					class="btn btn--quiet btn--sm"
+					@click.stop="toggle()"
+					:aria-label="playing ? 'Pause the reference clip' : 'Play the reference clip'"
+				>
+					<span x-show="!playing">
+						@iconPlay()
+					</span>
+					<span x-show="playing" x-cloak>
+						@iconPause()
+					</span>
+					<span x-text="playing ? 'Pause reference' : 'Play reference'">Play reference</span>
+				</button>
+				<button
+					type="button"
+					class="btn btn--quiet btn--sm"
+					@click.stop="editing = !editing"
+					aria-label={ "Rename " + v.Name }
+				>Rename</button>
+				<audio
+					x-ref="ref"
+					data-ref-preview
+					src={ "/voices/" + strconv.FormatInt(v.ID, 10) + "/reference" }
+					preload="none"
+					class="hidden"
+					@play="playing = true"
+					@pause="playing = false"
+					@ended="playing = false"
+				></audio>
+			</div>
+		}
+	</div>
+}
+
+// iconPlay / iconPause mark the reference-preview control. The control keeps
+// its word next to the glyph — a card is browsed, not scanned for width.
+templ iconPlay() {
+	<svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+		<path d="M2.5 1.5l8 4.5-8 4.5z"></path>
+	</svg>
+}
+
+templ iconPause() {
+	<svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+		<rect x="2.5" y="1.75" width="2.75" height="8.5"></rect>
+		<rect x="6.75" y="1.75" width="2.75" height="8.5"></rect>
+	</svg>
 }
 
 // uploadAffordance is the drag/drop + click-to-pick target. A hidden file input

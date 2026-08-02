@@ -42,7 +42,20 @@ func (s *Server) handleStudio(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	_ = web.Studio(items, available, audioDurations(items)).Render(r.Context(), w)
+	_ = web.Studio(items, available, audioDurations(items), selectedTake(r)).Render(r.Context(), w)
+}
+
+// selectedTake reads the take the queue is showing in the player. The queue
+// fragment sends it back on every poll, which is what keeps the highlighted row
+// highlighted across a swap that replaces the whole table every two seconds.
+// Zero means "no explicit selection" — the studio then falls back to the most
+// recent ready take.
+func selectedTake(r *http.Request) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("take")), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }
 
 // handleQueuePage renders the compose form and the current queue.
@@ -63,7 +76,7 @@ func (s *Server) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	_ = web.QueuePage(items, available, audioDurations(items)).Render(r.Context(), w)
+	_ = web.QueuePage(items, available, audioDurations(items), selectedTake(r)).Render(r.Context(), w)
 }
 
 // handleQueue answers GET /jobs with the queue fragment (or the row list, for
@@ -160,6 +173,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // renderQueue writes the queue as JSON or as the HTMX fragment.
+//
+// The fragment is only ever the queue: the player lives outside it, so this
+// two-second swap can never replace a playing <audio> element out from under
+// the user.
 func (s *Server) renderQueue(w http.ResponseWriter, r *http.Request, items []jobs.Job, justQueued int64) {
 	if wantsJSON(r) {
 		if items == nil {
@@ -170,7 +187,43 @@ func (s *Server) renderQueue(w http.ResponseWriter, r *http.Request, items []job
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = web.Queue(items, justQueued, audioDurations(items)).Render(r.Context(), w)
+	_ = web.Queue(items, justQueued, audioDurations(items), selectedTake(r)).Render(r.Context(), w)
+}
+
+// handleJobPlayer answers GET /jobs/{id}/player with the playback fragment for
+// one take — what a click on a queue row swaps into the player. It is a
+// separate route precisely so selecting a take is the only thing that
+// re-renders the player.
+func (s *Server) handleJobPlayer(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	job, err := s.jobs.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		serverError(w, r, err)
+		return
+	}
+	if job.UserID != userID {
+		http.Error(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	durations := audioDurations([]jobs.Job{job})
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = web.PlayerBody(job, durations[job.ID]).Render(r.Context(), w)
 }
 
 // audioDurations labels ready jobs' audio length ("0:06.02") from the saved
@@ -261,7 +314,6 @@ func parseJobParams(r *http.Request) (map[string]any, error) {
 	}
 	return params, nil
 }
-
 
 // handleDownloadAudio answers GET /jobs/{id}/audio by streaming the saved WAV file.
 func (s *Server) handleDownloadAudio(w http.ResponseWriter, r *http.Request) {

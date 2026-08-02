@@ -12,7 +12,8 @@ import (
 // Studio is the primary view: the masthead, the compose card (script editor +
 // parameters), the voice library, the render queue and the playback spoken
 // line — the whole product on one page, per DESIGN.md and index.html.
-templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string) {
+templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string, selected int64) {
+	{{ take := resolveSelected(items, selected) }}
 	@AppShell("Studio · Timbre", "studio") {
 		<header class="pb-12">
 			@spectrum()
@@ -46,14 +47,43 @@ templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string) {
 			<p class="mt-2 max-w-[62ch] text-text-dim">
 				Serverless endpoints sleep. The queue is honest about that: warming is a state
 				of its own, not a disguised spinner, and every row shows what it cost.
+				Pick a row to hear it.
 			</p>
 			<div class="mt-6">
-				@Queue(items, 0, durations)
+				@Queue(items, 0, durations, take)
 			</div>
 		</section>
-		@playbackSection(items, durations)
-		@studioHelpers()
+		@playbackSection(items, durations, take)
+		@studioHelpers(take)
 	}
+}
+
+// resolveSelected decides which take the player shows. An explicit selection
+// (the row the user clicked, echoed back by the queue's poll) wins as long as
+// the take still exists; otherwise the most recent ready take is the sensible
+// default, which is what the studio showed before rows were selectable.
+func resolveSelected(items []jobs.Job, selected int64) int64 {
+	if selected > 0 {
+		for _, j := range items {
+			if j.ID == selected {
+				return selected
+			}
+		}
+	}
+	if j, ok := latestReady(items); ok {
+		return j.ID
+	}
+	return 0
+}
+
+// takeByID returns the job with the given id.
+func takeByID(items []jobs.Job, id int64) (jobs.Job, bool) {
+	for _, j := range items {
+		if j.ID == id {
+			return j, true
+		}
+	}
+	return jobs.Job{}, false
 }
 
 // Compose is the render form: the script editor (the widest, quietest surface)
@@ -77,6 +107,7 @@ templ Compose(available []voices.Voice, selectedID int64) {
 				rows="6"
 				required
 				x-model="script"
+				x-ref="scriptBox"
 				:style="over ? 'border-color: var(--color-burnt)' : ''"
 				placeholder="Paste the script to render…"
 				class="input script-input"
@@ -176,7 +207,14 @@ templ Compose(available []voices.Voice, selectedID int64) {
 		</div>
 		<div class="flex flex-wrap items-center gap-3">
 			<button type="submit" class="btn">Render speech</button>
-			<button type="reset" class="btn btn--quiet">Reset controls</button>
+			<button
+				type="button"
+				class="btn btn--quiet"
+				x-show="chars > 0"
+				x-cloak
+				@click="script = ''; $refs.scriptBox.focus()"
+			>Clear script</button>
+			<button type="reset" class="btn btn--quiet" @click="script = ''">Reset controls</button>
 		</div>
 	</form>
 }
@@ -242,9 +280,11 @@ func waveHeights(n int) []float64 {
 	return out
 }
 
-// playbackSection renders the signature component for the most recent ready
-// take, or an invitation when nothing has rendered yet.
-templ playbackSection(items []jobs.Job, durations map[int64]string) {
+// playbackSection renders the signature component for the selected take. Its
+// inner div is the swap target for GET /jobs/{id}/player and nothing else: the
+// queue's two-second poll never touches it, so a take keeps playing while the
+// table around it refreshes.
+templ playbackSection(items []jobs.Job, durations map[int64]string, selected int64) {
 	<section class="mt-12 border-t border-line pt-12" id="playback">
 		<p class="eyebrow">Playback</p>
 		<h2 class="font-display text-[26px] font-semibold tracking-[-0.02em]">The spoken line</h2>
@@ -252,18 +292,52 @@ templ playbackSection(items []jobs.Job, durations map[int64]string) {
 			Waveform and script are one instrument: the played portion turns Teal, the word
 			being spoken sits in Olive, and everything already said settles to dim Paper.
 		</p>
-		<div class="mt-6">
-			if j, ok := latestReady(items); ok {
-				@spokenLinePlayer(j, durations[j.ID])
+		<div class="mt-6" id="playback-body">
+			if j, ok := takeByID(items, selected); ok {
+				@PlayerBody(j, durations[j.ID])
 			} else {
-				<div class="empty">
-					<span class="badge badge--live"><span class="dot"></span> Nothing rendered yet</span>
-					<h4>Nothing to play yet</h4>
-					<p>Render a take and it lands here — waveform, words and all, ready to hear and download.</p>
-				</div>
+				@PlayerBody(jobs.Job{}, "")
 			}
 		</div>
 	</section>
+}
+
+// PlayerBody is the playback fragment for one take — the studio's initial
+// paint and the answer to GET /jobs/{id}/player. A ready take gets the spoken
+// line; a take still on the rack says so rather than showing dead transport
+// controls; the zero job is the empty state.
+templ PlayerBody(j jobs.Job, dur string) {
+	if j.ID == 0 {
+		<div class="empty">
+			<span class="badge badge--live"><span class="dot"></span> Nothing rendered yet</span>
+			<h4>Nothing to play yet</h4>
+			<p>Render a take and it lands here — waveform, words and all, ready to hear and download.</p>
+		</div>
+	} else if j.Status == jobs.StatusReady {
+		@spokenLinePlayer(j, dur)
+	} else if j.Status == jobs.StatusFailed {
+		<div class="alert alert--limit" role="status">
+			<div>
+				<b>Take { strconv.FormatInt(j.ID, 10) } failed</b>
+				<p>
+					if j.Error != "" {
+						{ j.Error }
+					} else {
+						The render did not finish.
+					}
+					{ " " }
+					Queue it again, or pick another take from the queue.
+				</p>
+			</div>
+		</div>
+	} else {
+		<div class="alert alert--working" role="status">
+			<div>
+				<b>Take { strconv.FormatInt(j.ID, 10) } — { statusLabel(j.Status) }</b>
+				<p>It lands here the moment it is ready — the queue is watching for you.</p>
+			</div>
+		</div>
+	}
 }
 
 // spokenLinePlayer is the signature component wired to the take's real audio:
@@ -293,6 +367,9 @@ templ spokenLinePlayer(j jobs.Job, dur string) {
 				if j.VoiceKind == voices.KindCloned {
 					<span class="badge badge--cloned">Cloned voice</span>
 				}
+				if j.Model != "" {
+					<span class="badge badge--info">{ j.Model }</span>
+				}
 				<span class="font-mono text-[13px] tabular-nums text-text-faint">{ dur } · take { strconv.FormatInt(j.ID, 10) }</span>
 			</div>
 			<div class="flex flex-wrap items-center gap-2">
@@ -313,29 +390,100 @@ templ spokenLinePlayer(j jobs.Job, dur string) {
 }
 
 // studioHelpers is the small client-side script the studio and queue pages
-// share: slider fill binding, model↔card selection sync, and the spoken line's
-// Alpine component factory. Defined once per page, before Alpine boots.
-templ studioHelpers() {
-	<script>
+// share: slider fill binding, voice-card selection sync, queue-row selection,
+// the reference-preview component and the spoken line's Alpine component
+// factory. Defined once per page, before Alpine boots.
+//
+// selected seeds the take the queue reports back on each poll. It is written
+// once per page load, never from the queue fragment: a fragment that reset it
+// could overwrite a click the user made while the request was in flight.
+templ studioHelpers(selected int64) {
+	<script type="text/javascript" data-take={ strconv.FormatInt(selected, 10) }>
+		if (window.timbreTake === undefined) {
+			window.timbreTake = parseInt(document.currentScript.dataset.take, 10) || 0;
+		}
 		function rangeFill(el) {
 			var pct = (el.value - el.min) / (el.max - el.min) * 100;
 			el.style.setProperty('--fill', pct + '%');
 		}
-		// Click a voice card to select it: flip aria-pressed (the CSS restyles)
-		// and sync the compose form's hidden voice. Delegated to document so it
-		// survives the grid swap after an upload.
-		document.addEventListener('click', function (e) {
-			var btn = e.target.closest('.voice-card');
-			if (!btn) { return; }
-			var grid = btn.closest('#voice-grid');
+		// Select a voice card: flip aria-pressed (the CSS restyles) and sync the
+		// compose form's hidden voice. The card's own controls (rename, preview)
+		// stop propagation, so using them never changes the selection.
+		function timbreSelectVoice(card) {
+			var grid = card.closest('#voice-grid');
 			if (!grid) { return; }
 			grid.querySelectorAll('.voice-card').forEach(function (b) {
 				b.setAttribute('aria-pressed', 'false');
 			});
-			btn.setAttribute('aria-pressed', 'true');
+			card.setAttribute('aria-pressed', 'true');
 			var vid = document.getElementById('voice_id');
-			if (vid && btn.dataset.voiceId) { vid.value = btn.dataset.voiceId; }
+			if (vid && card.dataset.voiceId) { vid.value = card.dataset.voiceId; }
+		}
+		// Select a queue row: remember the take and mark it immediately, rather
+		// than waiting for the fragment HTMX is already fetching.
+		function timbreSelectTake(row) {
+			window.timbreTake = parseInt(row.dataset.take, 10) || 0;
+			timbrePaintTake();
+		}
+		// Re-assert the selection over whatever markup is currently in the DOM.
+		// The server renders the highlight and the poll URL carries the take, so
+		// this normally agrees with what just arrived — but a swap answering a
+		// delete or an enqueue has no take in its URL, and without this the
+		// highlight would blink off for a tick. It also points the next poll at
+		// the right URL straight after a click.
+		function timbrePaintTake() {
+			var queue = document.getElementById('queue');
+			if (!queue) { return; }
+			var take = window.timbreTake || 0;
+			queue.setAttribute('hx-get', take > 0 ? '/jobs?take=' + take : '/jobs');
+			queue.querySelectorAll('.queue-row').forEach(function (r) {
+				var on = take > 0 && parseInt(r.dataset.take, 10) === take;
+				r.classList.toggle('is-selected', on);
+				r.setAttribute('aria-selected', on ? 'true' : 'false');
+			});
+		}
+		// htmx 4 renamed afterSwap/afterSettle to htmx:after:swap.
+		document.addEventListener('htmx:after:swap', timbrePaintTake);
+		timbrePaintTake();
+		// Delegated to document so both survive a fragment swap.
+		document.addEventListener('click', function (e) {
+			var card = e.target.closest('.voice-card');
+			if (card) { timbreSelectVoice(card); return; }
+			var row = e.target.closest('.queue-row');
+			if (row) { timbreSelectTake(row); }
 		});
+		document.addEventListener('keyup', function (e) {
+			if (e.key !== 'Enter' && e.key !== ' ') { return; }
+			if (!e.target.closest) { return; }
+			var card = e.target.closest('.voice-card');
+			if (card) { timbreSelectVoice(card); return; }
+			var row = e.target.closest('.queue-row');
+			if (row) { timbreSelectTake(row); }
+		});
+		// Space on a focused card or row scrolls the page by default.
+		document.addEventListener('keydown', function (e) {
+			if (e.key !== ' ' || !e.target.closest) { return; }
+			if (e.target.closest('.voice-card') || e.target.closest('.queue-row')) {
+				e.preventDefault();
+			}
+		});
+		// The reference preview on a cloned voice card: one <audio> per card,
+		// pausing every other one so two clips never play at once.
+		window.voicePreview = function () {
+			return {
+				playing: false,
+				toggle: function () {
+					var a = this.$refs.ref;
+					if (!a) { return; }
+					if (this.playing) { a.pause(); return; }
+					document.querySelectorAll('audio[data-ref-preview]').forEach(function (other) {
+						if (other !== a) { other.pause(); }
+					});
+					var self = this;
+					a.play().then(function () { self.playing = true; }, function () {});
+				}
+			};
+		};
 		// The spoken line: an Alpine component painting the playhead through
 		// waveform bars (Teal past / Olive now) and words (settled dim, current
 		// Ink-on-Olive) from the audio element's clock.

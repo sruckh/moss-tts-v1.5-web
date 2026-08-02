@@ -81,7 +81,7 @@ func TestPaletteExhaustiveRenderedHTML(t *testing.T) {
 	items := []jobs.Job{
 		{ID: 9, UserID: 1, Status: jobs.StatusReady, VoiceID: 1, VoiceName: "Moss", VoiceKind: voices.KindStock,
 			Text: "Welcome back. Your last render finished.", AudioPath: "/x.wav", Format: "wav",
-			SampleRate: 24000, ExecMS: 4100},
+			SampleRate: 24000, ExecMS: 4100, Model: jobs.DefaultModel},
 		{ID: 8, UserID: 1, Status: jobs.StatusInProgress, VoiceID: 2, VoiceName: "Legacy", VoiceKind: voices.KindStock,
 			Text: "Chapter two, full read.", ExecMS: 38000},
 		{ID: 7, UserID: 1, Status: jobs.StatusQueued, VoiceID: 4, VoiceName: "Marrow", VoiceKind: voices.KindCloned,
@@ -92,9 +92,13 @@ func TestPaletteExhaustiveRenderedHTML(t *testing.T) {
 	durations := map[int64]string{9: "0:06.02"}
 
 	pages := map[string]templ.Component{
-		"Studio":       Studio(items, vs, durations),
-		"QueuePage":    QueuePage(items, vs, durations),
-		"Queue":        Queue(items, 9, durations),
+		"Studio":       Studio(items, vs, durations, 9),
+		"QueuePage":    QueuePage(items, vs, durations, 0),
+		"Queue":        Queue(items, 9, durations, 9),
+		"PlayerReady":  PlayerBody(items[0], durations[9]),
+		"PlayerBusy":   PlayerBody(items[1], ""),
+		"PlayerFailed": PlayerBody(items[3], ""),
+		"PlayerEmpty":  PlayerBody(jobs.Job{}, ""),
 		"VoiceLibrary": VoiceLibrary(vs),
 		"VoiceGrid":    VoiceGrid(vs, 4),
 		"Login":        Login("bad credentials"),

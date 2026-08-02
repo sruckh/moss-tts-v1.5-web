@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // KindStock / KindCloned are the two voice provenances.
@@ -45,6 +46,18 @@ var ErrNotFound = errors.New("voice not found")
 // ErrNoReference is returned when a voice has no stored reference bytes — stock
 // voices never have one.
 var ErrNoReference = errors.New("voice has no reference audio")
+
+// Rename validation failures. The handler maps each to a 400 with the error
+// text, so the messages are user-facing.
+var (
+	ErrEmptyName    = errors.New("give the voice a name")
+	ErrNameTooLong  = fmt.Errorf("voice name is longer than %d characters", MaxNameLen)
+	ErrNotRenamable = errors.New("stock voices keep their given name")
+)
+
+// MaxNameLen bounds a voice name. A card shows the name on one display line;
+// anything longer is a description, not a name.
+const MaxNameLen = 60
 
 // Voice is one row of the voices table.
 type Voice struct {
@@ -217,6 +230,49 @@ func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 	}
 	v.ReferencePath = ref.V
 	return v, nil
+}
+
+// Rename sets a cloned voice's display name. The name an upload derives from
+// its filename is a starting point, not a verdict — a library is only
+// browsable if the user can say what a voice is.
+//
+// Only clones rename. SeedStock reconciles stock rows *by name*, so a renamed
+// stock row would read as stale on the next boot: deleted and reseeded, taking
+// every job's voice link with it (the FK is ON DELETE SET NULL). Refusing is
+// honest; silently losing history on the next restart is not.
+//
+// Validation mirrors Enqueue's — user-facing errors, never a silent truncation.
+func (s *Store) Rename(ctx context.Context, id int64, name string) error {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return ErrEmptyName
+	case utf8.RuneCountInString(name) > MaxNameLen:
+		return ErrNameTooLong
+	}
+
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE voices SET name = ? WHERE id = ? AND kind = 'cloned'`, name, id)
+	if err != nil {
+		return fmt.Errorf("rename voice %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rename voice %d: %w", id, err)
+	}
+	if affected == 1 {
+		return nil
+	}
+	// Nothing changed: either the row is gone or it is a stock voice.
+	v, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if v.Kind != KindCloned {
+		return ErrNotRenamable
+	}
+	// The row exists and is a clone, so the name was already what was asked for.
+	return nil
 }
 
 // Reference returns the stored reference audio together with its container
