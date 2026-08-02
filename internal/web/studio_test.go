@@ -248,7 +248,8 @@ func TestPlayerWordTimings(t *testing.T) {
 	}
 }
 
-// The Queue container must be scrollable with max-height corresponding to 10 items.
+// The Queue container must be scrollable with max-height corresponding to 10 items,
+// and preserve scroll position across 2s HTMX updates.
 func TestQueueContainerIsScrollableWithMaxHeight(t *testing.T) {
 	html := render(t, Queue(sampleJobs(), 0, nil, 0))
 
@@ -257,6 +258,12 @@ func TestQueueContainerIsScrollableWithMaxHeight(t *testing.T) {
 	}
 	if !strings.Contains(html, "max-h-[500px]") {
 		t.Error("queue container missing max height constraint 'max-h-[500px]'")
+	}
+	if !strings.Contains(html, `hx-swap="outerHTML show:none"`) {
+		t.Error("queue fragment missing 'show:none' swap modifier to prevent auto-scrolling")
+	}
+	if !strings.Contains(html, `hx-on::before-swap=`) || !strings.Contains(html, `hx-on::after-swap=`) {
+		t.Error("queue fragment missing scroll preservation handlers for HTMX swaps")
 	}
 }
 

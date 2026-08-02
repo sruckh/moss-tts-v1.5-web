@@ -122,7 +122,9 @@ templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, sele
 		id="queue"
 		hx-get={ queuePollURL(selected) }
 		hx-trigger="every 2s"
-		hx-swap="outerHTML"
+		hx-swap="outerHTML show:none"
+		hx-on::before-swap="const el = this.querySelector('.scrollable-list'); window._queueScrollTop = el ? el.scrollTop : 0;"
+		hx-on::after-swap="const el = this.querySelector('.scrollable-list'); if (el &amp;&amp; window._queueScrollTop !== undefined) el.scrollTop = window._queueScrollTop;"
 		data-take={ strconv.FormatInt(selected, 10) }
 		class="flex flex-col gap-3"
 	>
