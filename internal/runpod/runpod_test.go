@@ -274,6 +274,49 @@ func TestStatusQueriesEndpoint(t *testing.T) {
 	}
 }
 
+// The live endpoint runs its handler with return_aggregate_stream, so RunPod
+// delivers the output of a completed job as an ARRAY of yields, not an object.
+// Decoding must accept both or the poll fails forever (regression: job stuck
+// in_progress with "cannot unmarshal array into StatusResult.output").
+func TestStatusAcceptsAggregatedArrayOutput(t *testing.T) {
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"job-100","status":"COMPLETED","delayTime":100,"executionTime":500,"output":[{"status":"success","audio_base64":"QUJD","format":"wav","sample_rate":24000,"detected_language":"English"}]}`)
+	}))
+	defer double.Close()
+
+	client := New(double.URL, "k", WithHTTPClient(double.Client()))
+	got, err := client.Status(context.Background(), "job-100")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got.Output.AudioBase64 != "QUJD" {
+		t.Errorf("audio_base64 = %q, want QUJD from the aggregated array", got.Output.AudioBase64)
+	}
+	if got.Output.Format != "wav" || got.Output.SampleRate != 24000 {
+		t.Errorf("format/rate = %q/%d, want wav/24000", got.Output.Format, got.Output.SampleRate)
+	}
+}
+
+// A response whose shape genuinely does not match the schema (not object, not
+// array) means the endpoint changed — that is permanent, never transient.
+func TestStatusSchemaMismatchIsPermanent(t *testing.T) {
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"job-101","status":"COMPLETED","output":42}`)
+	}))
+	defer double.Close()
+
+	client := New(double.URL, "k", WithHTTPClient(double.Client()))
+	_, err := client.Status(context.Background(), "job-101")
+	if err == nil {
+		t.Fatal("Status: expected a decode error for output=42")
+	}
+	if !IsPermanent(err) {
+		t.Errorf("IsPermanent(%v) = false, want true — a schema change must fail the job, not retry forever", err)
+	}
+}
+
 func TestConfigured(t *testing.T) {
 	if New("", "").Configured() {
 		t.Error("empty client reported configured")

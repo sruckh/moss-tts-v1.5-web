@@ -21,6 +21,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -74,6 +75,21 @@ func (e *Error) Permanent() bool {
 	return false
 }
 
+// DecodeError is a response whose shape does not match the client's schema —
+// the endpoint changed its payload. Retrying the identical query cannot help,
+// so the worker classifies it as permanent and the job fails loudly instead of
+// retrying forever.
+type DecodeError struct {
+	Path string
+	Err  error
+}
+
+func (e *DecodeError) Error() string {
+	return fmt.Sprintf("runpod: decode %s response: %v", e.Path, e.Err)
+}
+
+func (e *DecodeError) Unwrap() error { return e.Err }
+
 // IsPermanent reports whether err is a failure that retrying cannot fix.
 func IsPermanent(err error) bool {
 	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoAPIKey) {
@@ -82,6 +98,10 @@ func IsPermanent(err error) bool {
 	var apiErr *Error
 	if errors.As(err, &apiErr) {
 		return apiErr.Permanent()
+	}
+	var decodeErr *DecodeError
+	if errors.As(err, &decodeErr) {
+		return true
 	}
 	return false
 }
@@ -242,6 +262,46 @@ type Output struct {
 	DetectedLanguage string `json:"detected_language,omitempty"`
 }
 
+// outputJSON is Output without its methods, so the custom unmarshaler can
+// delegate to the default decoding without recursing.
+type outputJSON Output
+
+// UnmarshalJSON accepts both shapes the endpoint produces. A plain handler
+// return lands as an object; since the handler runs with
+// return_aggregate_stream (sruckh/mossTTS-v1.5-runpod-serverless), RunPod
+// aggregates yields into an ARRAY — the completed payload is its last element
+// (or the last one carrying audio). Treating only the object form as valid
+// stranded jobs forever: the poll failed to decode and looked transient.
+func (o *Output) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	if len(data) > 0 && data[0] == '[' {
+		var arr []outputJSON
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		if len(arr) == 0 {
+			return nil
+		}
+		pick := arr[len(arr)-1]
+		for i, e := range slices.Backward(arr) {
+			if e.AudioBase64 != "" {
+				pick = arr[i]
+				break
+			}
+		}
+		*o = Output(pick)
+		return nil
+	}
+	var obj outputJSON
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	*o = Output(obj)
+	return nil
+}
+
 // ErrorString formats Error into a string regardless of whether it was returned
 // as a string or an object.
 func (sr StatusResult) ErrorString() string {
@@ -314,6 +374,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		// A type mismatch means the endpoint's schema changed — permanent.
+		// A syntax error or truncated body may be a network glitch — transient.
+		var ute *json.UnmarshalTypeError
+		if errors.As(err, &ute) {
+			return &DecodeError{Path: path, Err: err}
+		}
 		return fmt.Errorf("runpod: decode %s response: %w", path, err)
 	}
 	return nil
