@@ -108,7 +108,7 @@ templ VoiceLibrary(items []voices.Voice) {
 // and by the upload handler (so HTMX can refresh it in place). Its root carries
 // id="voice-grid".
 templ VoiceGrid(items []voices.Voice, selectedID int64) {
-	<div id="voice-grid" class="grid gap-4 sm:grid-cols-2">
+	<div id="voice-grid" class="grid gap-4 sm:grid-cols-2 scrollable-list max-h-[670px] pr-1">
 		if len(items) == 0 {
 			<div class="empty col-span-full">
 				<span class="badge badge--live"><span class="dot"></span> No voices yet</span>

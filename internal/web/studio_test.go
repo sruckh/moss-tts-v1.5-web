@@ -247,3 +247,27 @@ func TestPlayerWordTimings(t *testing.T) {
 		t.Errorf("unaligned take did not render the script's words:\n%s", html)
 	}
 }
+
+// The Queue container must be scrollable with max-height corresponding to 10 items.
+func TestQueueContainerIsScrollableWithMaxHeight(t *testing.T) {
+	html := render(t, Queue(sampleJobs(), 0, nil, 0))
+
+	if !strings.Contains(html, "scrollable-list") {
+		t.Error("queue container missing class 'scrollable-list'")
+	}
+	if !strings.Contains(html, "max-h-[500px]") {
+		t.Error("queue container missing max height constraint 'max-h-[500px]'")
+	}
+}
+
+// The VoiceGrid container must be scrollable with max-height corresponding to 10 items.
+func TestVoiceGridContainerIsScrollableWithMaxHeight(t *testing.T) {
+	html := render(t, VoiceGrid(sampleVoices(), 1))
+
+	if !strings.Contains(html, "scrollable-list") {
+		t.Error("voice grid container missing class 'scrollable-list'")
+	}
+	if !strings.Contains(html, "max-h-[670px]") {
+		t.Error("voice grid container missing max height constraint 'max-h-[670px]'")
+	}
+}
