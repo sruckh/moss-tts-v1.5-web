@@ -110,6 +110,13 @@ docker compose up -d
 docker compose run --rm test go test ./...
 ```
 
+`scripts/run.sh` wraps the start/stop flow and the env.sh-then-up ordering that
+secret injection depends on: `scripts/run.sh start` sources `env.sh`, runs
+`docker compose up -d --build`, waits on `/healthz`, and verifies
+`RUNPOD_API_KEY` landed in the app process; `stop` / `restart` / `status` /
+`logs` do what they say. It is the operator-facing one command; the raw
+`docker compose` invocations above remain the source of truth.
+
 `scripts/env.sh` loads the machine-identity credentials from a config directory
 **outside this repo** (`~/.config/timbre/` by default; override with
 `INFISICAL_CONFIG` / `INFISICAL_SECRET_GPG`). Nothing there is ever committed —

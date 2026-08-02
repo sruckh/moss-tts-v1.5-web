@@ -55,6 +55,19 @@ The complete product works end to end: paste a script, pick or clone a voice, re
 
 Everything builds and runs in Docker. There is no Go, Node, templ or SQLite toolchain on the host, and none is needed.
 
+One command does the lot — loads the Infisical identity, builds, starts the stack, and confirms the keys were injected:
+
+```bash
+# First time only: create .env and set at least RUNPOD_ENDPOINT.
+cp .env.example .env && $EDITOR .env
+
+scripts/run.sh start    # sources scripts/env.sh → docker compose up -d → verifies
+```
+
+`start` is the only correct way to bring the stack up: `scripts/env.sh` must be sourced **before** `docker compose up` so the machine identity is forwarded into the containers, where `docker/entrypoint.sh` trades it for a token and runs the app under `infisical run`. Skip that and no secrets are injected. Stop with `scripts/run.sh stop`; see `scripts/run.sh` (no args) for `restart`, `status`, `logs`.
+
+Or, step by step (the wrapper runs exactly this):
+
 ```bash
 # 1. Set your deployment values. .env is git-ignored.
 cp .env.example .env && $EDITOR .env
@@ -140,7 +153,7 @@ internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /hea
 internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
 internal/web/        templ app shell + studio + login + voice library + queue + playback, Tailwind theme, favicons, palette test (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
-scripts/             env.sh (load identity), sync-generated.sh (LSP support)
+scripts/             env.sh (load identity), run.sh (start/stop the stack with Infisical injection), sync-generated.sh (LSP support)
 ```
 
 `AGENTS.md` is the operating contract for AI agents working in this repo — build commands, the secret-injection caveat, and the CSS rules live there.
