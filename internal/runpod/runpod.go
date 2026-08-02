@@ -260,6 +260,32 @@ type Output struct {
 	Format           string `json:"format,omitempty"`
 	SampleRate       int    `json:"sample_rate,omitempty"`
 	DetectedLanguage string `json:"detected_language,omitempty"`
+
+	// WordTimings is the optional forced-alignment block the serverless worker
+	// attaches to non-streaming payloads (absent on streaming, on older workers,
+	// or whenever alignment failed). It is a POINTER so a missing key decodes to
+	// nil: do() turns a JSON type mismatch into a permanent DecodeError, so a
+	// required field here would hard-fail every job from a worker that omits it.
+	// Absent key ⇒ nil ⇒ the player falls back to proportional interpolation.
+	WordTimings *WordTimings `json:"word_timings,omitempty"`
+}
+
+// WordTimings is the optional word-level timing block the serverless worker
+// emits from MMS_FA forced alignment. FrameRate and Source are informational;
+// Words is the playhead the player walks.
+type WordTimings struct {
+	FrameRate float64      `json:"frame_rate,omitempty"`
+	Source    string       `json:"source,omitempty"`
+	Words     []WordTiming `json:"words"`
+}
+
+// WordTiming is one spoken word: the model-normalized text actually rendered
+// (not the caller's input — the model reflows numbers, punctuation and pinyin)
+// and its [Start, End) seconds from the start of the returned WAV.
+type WordTiming struct {
+	W     string  `json:"w"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
 }
 
 // outputJSON is Output without its methods, so the custom unmarshaler can

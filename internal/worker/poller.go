@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,7 +21,7 @@ const DefaultPollerInterval = 2 * time.Second
 type PollerJobStore interface {
 	ListPendingRunPod(ctx context.Context, limit int) ([]jobs.Job, error)
 	UpdateStatus(ctx context.Context, id int64, status string) error
-	MarkReady(ctx context.Context, id int64, audioPath, format string, sampleRate int, delayMS, execMS int64) error
+	MarkReady(ctx context.Context, id int64, audioPath, format string, sampleRate int, delayMS, execMS int64, alignmentJSON string) error
 	MarkPollerFailed(ctx context.Context, id int64, reason string) error
 }
 
@@ -175,7 +176,18 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 			sampleRate = 24000
 		}
 
-		if err := p.jobs.MarkReady(ctx, job.ID, fullPath, ext, sampleRate, res.DelayTime, res.ExecutionTime); err != nil {
+		// word_timings is optional: the worker omits it for streaming renders,
+		// older builds, or failed alignment. nil ⇒ empty string ⇒ the player
+		// interpolates word positions. A marshal failure is treated like absence
+		// — it never fails a job that already has good audio.
+		alignmentJSON := ""
+		if res.Output.WordTimings != nil {
+			if b, err := json.Marshal(res.Output.WordTimings); err == nil {
+				alignmentJSON = string(b)
+			}
+		}
+
+		if err := p.jobs.MarkReady(ctx, job.ID, fullPath, ext, sampleRate, res.DelayTime, res.ExecutionTime, alignmentJSON); err != nil {
 			p.log.Error("poller: mark ready", "job", job.ID, "err", err)
 			return
 		}

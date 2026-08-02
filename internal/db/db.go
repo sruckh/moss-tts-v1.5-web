@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 	text        TEXT    NOT NULL,
 	language    TEXT,
 	params_json TEXT,
-	model       TEXT,
+	model          TEXT,
+	alignment_json TEXT,
 	status      TEXT    NOT NULL DEFAULT 'queued'
 	            CHECK (status IN ('queued','submitted','in_progress','ready','failed')),
 	runpod_id   TEXT,
@@ -129,6 +130,14 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 	if _, err := handle.ExecContext(ctx,
 		`UPDATE jobs SET model = 'MOSS-TTS v1.5' WHERE model IS NULL OR model = ''`); err != nil {
 		return fmt.Errorf("migrate: backfill jobs.model: %w", err)
+	}
+	// jobs.alignment_json stores the optional word_timings block the serverless
+	// worker attaches, so the player can track the spoken word from real forced
+	// alignment instead of proportional interpolation. NULL/empty means the
+	// worker omitted it (older build, streaming, alignment failed) and the player
+	// falls back — it is never required.
+	if err := addColumnIfMissing(ctx, handle, "jobs", "alignment_json", "TEXT"); err != nil {
+		return fmt.Errorf("migrate: add jobs.alignment_json: %w", err)
 	}
 	return nil
 }

@@ -368,8 +368,9 @@ func TestPollerAndDeleteStoreOperations(t *testing.T) {
 		t.Errorf("Status = %q, want %s", got.Status, StatusInProgress)
 	}
 
-	// 5. MarkReady
-	if err := store.MarkReady(ctx, id, "/data/audio/renders/job_1.wav", "wav", 24000, 100, 500); err != nil {
+	// 5. MarkReady (carrying the optional word_timings block)
+	alignment := `{"frame_rate":50,"source":"mms_fa_forced_alignment","words":[{"w":"One.","start":0.0,"end":0.4}]}`
+	if err := store.MarkReady(ctx, id, "/data/audio/renders/job_1.wav", "wav", 24000, 100, 500, alignment); err != nil {
 		t.Fatalf("MarkReady: %v", err)
 	}
 	got, err = store.Get(ctx, id)
@@ -384,6 +385,9 @@ func TestPollerAndDeleteStoreOperations(t *testing.T) {
 	}
 	if got.Format != "wav" || got.SampleRate != 24000 || got.DelayMS != 100 || got.ExecMS != 500 {
 		t.Errorf("Details = %s/%d/%d/%d, want wav/24000/100/500", got.Format, got.SampleRate, got.DelayMS, got.ExecMS)
+	}
+	if got.AlignmentJSON != alignment {
+		t.Errorf("AlignmentJSON = %q, want the word_timings block verbatim", got.AlignmentJSON)
 	}
 
 	// 6. Delete

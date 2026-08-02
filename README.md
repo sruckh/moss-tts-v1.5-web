@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: complete.** The whole product is built and deployed at [timbre.gemneye.xyz](https://timbre.gemneye.xyz) — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), decodes & saves completed WAV audio files, streams downloads, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, and spoken-line playback that names the model it rendered with. [What works today](#what-works-today) is exact.
+> **Status: complete.** The whole product is built — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), captures the worker's optional `word_timings` forced alignment, decodes & saves completed WAV audio files, streams downloads, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, and spoken-line playback that tracks the word being spoken from real per-word timing and names the model it rendered with. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -42,13 +42,14 @@ Two consequences worth knowing before you read the code:
 | ✅ Queue status polling — HTMX `hx-trigger="every 2s"` auto-refreshes queue status in the browser | Done |
 | ✅ Studio UI at `/` — script editor with character meter and one-click clear, parameter fields (Seed, Pace, Pitch, Expressiveness, output toggles), voice-card library, a render-queue table that fits the viewport (icon-only row actions, no horizontal scroll), spoken-line playback | Done |
 | ✅ Pick a take to play — click, or press Enter/Space on, a queue row to highlight it and load that take into the player. The highlight survives the 2s poll, and the poll never interrupts playback | Done |
+| ✅ Word-level playback timing — the poller captures the worker's optional `word_timings` (MMS_FA forced alignment) and stores it on the job; the player highlights the word being spoken from real per-word start/end times, falling back to proportional interpolation for takes that have none | Done |
 | ✅ Rename a voice — `POST /voices/{id}/name` replaces the filename a clone was uploaded under. Clones only: renaming a stock voice would be undone by the startup seed | Done |
 | ✅ Audition a reference clip — `GET /voices/{id}/reference` plays a cloned voice's source audio from its card. Session-gated and marked private; RunPod still receives the bytes base64-inline, never a URL | Done |
 | ✅ Model provenance — `jobs.model` records what rendered each take (backfilled for older rows on migrate) and the player shows it as a badge | Done |
 | ✅ Palette-exhaustive test — `internal/web/palette_test.go` fails if any color outside the 10 palette hexes appears in compiled CSS or rendered HTML | Enforced in `go test` |
 | ✅ Favicon set — apple-touch-icon, PNG icons, manifest, all embedded and served under `/static/` | Done |
 
-The complete product is live: paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with the queue, submission, polling, and storage owned by the app.
+The complete product works end to end: paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with the queue, submission, polling, alignment capture, and storage owned by the app.
 
 ## Quick start
 
@@ -134,8 +135,8 @@ internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
 internal/server/     chi router, login/logout, /healthz + /health, / studio, /voices + upload + rename + reference preview, /queue + /jobs + player fragment + audio download & delete, static assets
 internal/voices/     voice library: MOSS default-voice seed (single-model contract), reference upload, rename (clones only), blob storage + read-back
-internal/jobs/       jobs table: enqueue + validation (records the rendering model), claim/submit/fail state transitions, audio metadata & deletion
-internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, output decoded as object-or-aggregate-array, permanent-vs-transient errors
+internal/jobs/       jobs table: enqueue + validation (records the rendering model), claim/submit/fail state transitions, audio & word-timing metadata (`alignment_json`) & deletion
+internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, output decoded as object-or-aggregate-array (incl. the optional `word_timings` forced-alignment block), permanent-vs-transient errors
 internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
 internal/web/        templ app shell + studio + login + voice library + queue + playback, Tailwind theme, favicons, palette test (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
@@ -150,8 +151,9 @@ scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 - **Two health routes, on purpose.** `/healthz` is public, unauthenticated and says nothing about RunPod — it is what the container `HEALTHCHECK` and NGINX Proxy Manager's upstream probe call, and container liveness must not depend on a third party or a RunPod outage would restart a healthy app. `/health` is the operator view: it needs a session, probes the endpoint, and returns `200` with `runpod.reachable: false` rather than a 5xx.
 - **The player deliberately sits outside the polled fragment.** The queue refreshes itself by replacing `#queue` wholesale every two seconds, so anything inside it is destroyed on the tick. The player lives in `#playback-body` next to it and is swapped only when you pick a row — inside the queue, audio would restart every two seconds. The same swap is why the queue table has no horizontal scroller: it used to reset your scroll position a few seconds after every scroll, so the table was made to fit instead. Selection survives the tick because the poll sends the selected take back and the server re-renders the highlight.
 - **Submitting twice is impossible, not merely unlikely.** `ClaimQueued` only hands out rows with a null `runpod_id`, and recording the id is a compare-and-set, so a duplicate submission can never overwrite the first. `jobs.runpod_id` carries a partial unique index as the last line of defence.
+- **Word timing is real, with a graceful fallback.** When the worker returns `word_timings` (forced alignment of the synthesized waveform against the model-normalized transcript), the poller stores it on the job as `alignment_json` and the player walks the playhead word by word from each word's `start`/`end` seconds. The block is optional — older workers, streaming renders, and failed alignments omit it — so the field is a nullable pointer that decodes to "no timing," and the player then interpolates word positions across the audio duration. The spoken line is always rendered from the model's own words, never the caller's input, because the model reflows numbers, punctuation, and pinyin before synthesis.
 - **A missing or rejected `RUNPOD_API_KEY` fails jobs; it does not hang them.** That case is classified permanent and fails on the first attempt with the reason on the row. Transient errors (429, 5xx, network) retry three times, counted in `jobs.attempts`, then fail.
-- **Streaming.** RunPod exposes `/stream/{id}`; Timbre targets the non-streaming path first. Streaming playback is secondary.
+- **Streaming.** RunPod exposes `/stream/{id}`; Timbre targets the non-streaming path first — which is also the only path that carries `word_timings` (the worker omits it for streaming renders). Streaming playback is secondary.
 
 ## License
 

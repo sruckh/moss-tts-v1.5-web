@@ -106,3 +106,20 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// jobs.alignment_json arrives with word-level timing: created on fresh DBs by
+// the schema and added to existing DBs by Migrate. The player falls back to
+// interpolation when it is NULL/empty, so the column itself is the only thing
+// the migration must guarantee.
+func TestMigrateAddsAlignmentJSON(t *testing.T) {
+	handle := openTestDB(t)
+
+	var count int
+	if err := handle.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'alignment_json'`).Scan(&count); err != nil {
+		t.Fatalf("query column: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("jobs.alignment_json column count = %d, want 1", count)
+	}
+}

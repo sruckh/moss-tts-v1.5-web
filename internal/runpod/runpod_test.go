@@ -325,3 +325,66 @@ func TestConfigured(t *testing.T) {
 		t.Error("fully configured client reported unconfigured")
 	}
 }
+
+// word_timings is an optional, additive key the serverless worker attaches.
+// It must decode when present and stay nil when absent — a missing key can
+// never fail a job, since do() turns a JSON type mismatch into a permanent
+// DecodeError (the field is therefore a pointer with omitempty).
+func TestOutputDecodesWordTimings(t *testing.T) {
+	const withTimings = `{"id":"j","status":"COMPLETED","output":{"status":"success","audio_base64":"QUJD","format":"wav","sample_rate":24000,"word_timings":{"frame_rate":50.0,"source":"mms_fa_forced_alignment","words":[{"w":"Hello,","start":0.02,"end":0.41},{"w":"world.","start":0.45,"end":0.80}]}}}`
+
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, withTimings)
+	}))
+	defer double.Close()
+
+	client := New(double.URL, "k", WithHTTPClient(double.Client()))
+	got, err := client.Status(context.Background(), "j")
+	if err != nil {
+		t.Fatalf("Status with word_timings: %v", err)
+	}
+	if got.Output.WordTimings == nil {
+		t.Fatal("WordTimings = nil, want the decoded block")
+	}
+	if got.Output.WordTimings.Source != "mms_fa_forced_alignment" {
+		t.Errorf("source = %q, want mms_fa_forced_alignment", got.Output.WordTimings.Source)
+	}
+	if len(got.Output.WordTimings.Words) != 2 {
+		t.Fatalf("words = %d, want 2", len(got.Output.WordTimings.Words))
+	}
+	if w := got.Output.WordTimings.Words[0]; w.W != "Hello," || w.Start != 0.02 || w.End != 0.41 {
+		t.Errorf("first word = %+v, want Hello,/0.02/0.41", w)
+	}
+
+	// Absent key ⇒ nil, no error (an older worker or a streaming render omits it).
+	double2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"j2","status":"COMPLETED","output":{"status":"success","audio_base64":"QUJD","format":"wav","sample_rate":24000}}`)
+	}))
+	defer double2.Close()
+
+	got2, err := New(double2.URL, "k", WithHTTPClient(double2.Client())).Status(context.Background(), "j2")
+	if err != nil {
+		t.Fatalf("Status without word_timings: %v", err)
+	}
+	if got2.Output.WordTimings != nil {
+		t.Errorf("WordTimings = %+v, want nil when the key is absent", got2.Output.WordTimings)
+	}
+
+	// The aggregated-array form (return_aggregate_stream) must surface
+	// word_timings from the same element it takes the audio from.
+	double3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"j3","status":"COMPLETED","output":[{"status":"success","audio_base64":"QUJD","format":"wav","sample_rate":24000,"word_timings":{"source":"mms_fa_forced_alignment","words":[{"w":"Hi.","start":0.0,"end":0.3}]}}]}`)
+	}))
+	defer double3.Close()
+
+	got3, err := New(double3.URL, "k", WithHTTPClient(double3.Client())).Status(context.Background(), "j3")
+	if err != nil {
+		t.Fatalf("Status array form: %v", err)
+	}
+	if got3.Output.WordTimings == nil || len(got3.Output.WordTimings.Words) != 1 {
+		t.Errorf("array-form WordTimings = %+v, want one word", got3.Output.WordTimings)
+	}
+}

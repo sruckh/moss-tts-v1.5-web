@@ -349,7 +349,7 @@ func TestDownloadAudioRoute(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := srv.jobs.MarkReady(ctx, id, audioFile, "wav", 24000, 10, 50); err != nil {
+	if err := srv.jobs.MarkReady(ctx, id, audioFile, "wav", 24000, 10, 50, ""); err != nil {
 		t.Fatalf("MarkReady: %v", err)
 	}
 
@@ -418,7 +418,7 @@ func TestDeleteJobRoute(t *testing.T) {
 	if err := os.WriteFile(audioFile, []byte("data"), 0o640); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if err := srv.jobs.MarkReady(ctx, readyID, audioFile, "wav", 24000, 10, 50); err != nil {
+	if err := srv.jobs.MarkReady(ctx, readyID, audioFile, "wav", 24000, 10, 50, ""); err != nil {
 		t.Fatalf("MarkReady: %v", err)
 	}
 

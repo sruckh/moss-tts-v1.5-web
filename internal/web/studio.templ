@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
@@ -268,6 +269,34 @@ func scriptWords(text string) []string {
 	return strings.Fields(text)
 }
 
+// timedWord is one word with its real start/end seconds, captured by the
+// serverless worker's forced alignment. When alignment is present the spoken
+// line is rendered from these: the model normalizes text before synthesis
+// (numbers expanded, punctuation reflowed, pinyin rewritten), so W is what was
+// actually said — not the caller's input.
+type timedWord struct {
+	W     string  `json:"w"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
+// alignmentWords decodes a job's stored word_timings block into its timed
+// words. An empty or malformed block yields nil, which the caller treats as
+// "no alignment — interpolate": bad data must never wedge the player.
+func alignmentWords(alignmentJSON string) []timedWord {
+	s := strings.TrimSpace(alignmentJSON)
+	if s == "" {
+		return nil
+	}
+	var payload struct {
+		Words []timedWord `json:"words"`
+	}
+	if err := json.Unmarshal([]byte(s), &payload); err != nil {
+		return nil
+	}
+	return payload.Words
+}
+
 // waveHeights returns n deterministic bar heights (px) for the spoken line's
 // waveform — the living reference's envelope, computed server-side so the
 // markup is stable.
@@ -357,8 +386,18 @@ templ spokenLinePlayer(j jobs.Job, dur string) {
 			<span class="time" x-text="timeLabel">{ "0:00 / " + dur }</span>
 		</div>
 		<p class="script" x-ref="script">
-			for _, w := range scriptWords(j.Text) {
-				<span class="wd">{ w }</span>{ " " }
+			{{
+				words := alignmentWords(j.AlignmentJSON)
+				fallback := scriptWords(j.Text)
+			}}
+			if len(words) > 0 {
+				for _, w := range words {
+					<span class="wd" data-t0={ strconv.FormatFloat(w.Start, 'f', 3, 64) } data-t1={ strconv.FormatFloat(w.End, 'f', 3, 64) }>{ w.W }</span>{ " " }
+				}
+			} else {
+				for _, w := range fallback {
+					<span class="wd">{ w }</span>{ " " }
+				}
 			}
 		</p>
 		<div class="player-foot">
@@ -517,7 +556,21 @@ templ studioHelpers(selected int64) {
 						bars[i].className = i < edge ? 'past' : (i === edge && this.playing ? 'now' : '');
 					}
 					var words = this.$refs.script.querySelectorAll('.wd');
-					var wi = Math.floor(p * words.length);
+					// Real timing when the server emitted data-t0/data-t1; the
+					// current word is the last whose start is at or before the
+					// playhead. Otherwise fall back to proportional interpolation
+					// across the words by audio position.
+					var timed = words.length > 0 && words[0].dataset.t0 !== undefined;
+					var wi;
+					if (timed) {
+						wi = -1;
+						for (var k = 0; k < words.length; k++) {
+							if (t < parseFloat(words[k].dataset.t0)) { break; }
+							wi = k;
+						}
+					} else {
+						wi = Math.floor(p * words.length);
+					}
 					for (var j = 0; j < words.length; j++) {
 						words[j].className = j < wi ? 'wd said' : (j === wi && this.playing ? 'wd now' : 'wd');
 					}

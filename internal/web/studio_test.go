@@ -219,3 +219,31 @@ func TestVoiceCardControls(t *testing.T) {
 		t.Error("the voice card is still a button and now nests buttons")
 	}
 }
+
+// When a take carries forced alignment, the spoken line renders one timed span
+// per word with data-t0/data-t1 (so the playhead tracks real speech from the
+// model-normalized words). Without alignment it emits no timing attributes and
+// the client falls back to proportional interpolation across the script's words.
+func TestPlayerWordTimings(t *testing.T) {
+	ready := sampleJobs()[0] // a ready take
+
+	// With alignment: timed spans, rendered from the alignment's own words.
+	ready.AlignmentJSON = `{"frame_rate":50,"source":"mms_fa_forced_alignment","words":[{"w":"Welcome","start":0.00,"end":0.30},{"w":"back.","start":0.32,"end":0.55}]}`
+	html := render(t, PlayerBody(ready, "0:06.02"))
+	if !strings.Contains(html, `data-t0=`) || !strings.Contains(html, `data-t1=`) {
+		t.Errorf("aligned take did not emit data-t0/data-t1 word spans:\n%s", html)
+	}
+	if !strings.Contains(html, ">Welcome<") || !strings.Contains(html, ">back.<") {
+		t.Errorf("aligned take did not render the alignment's own words:\n%s", html)
+	}
+
+	// Without alignment: no timing attributes — pure interpolation fallback.
+	ready.AlignmentJSON = ""
+	html = render(t, PlayerBody(ready, "0:06.02"))
+	if strings.Contains(html, `data-t0=`) {
+		t.Errorf("unaligned take emitted data-t0; it must fall back to interpolation:\n%s", html)
+	}
+	if !strings.Contains(html, ">Welcome<") {
+		t.Errorf("unaligned take did not render the script's words:\n%s", html)
+	}
+}

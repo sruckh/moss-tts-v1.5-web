@@ -78,6 +78,12 @@ type Job struct {
 	// never migrated.
 	Model string `json:"model,omitempty"`
 
+	// AlignmentJSON is the optional word_timings block the serverless worker
+	// attaches (forced alignment), stored verbatim. Empty for streaming renders,
+	// older workers, or failed alignment — the player then interpolates word
+	// positions from the audio duration instead.
+	AlignmentJSON string `json:"alignment_json,omitempty"`
+
 	// RunPodID is the async job id returned by POST /run. Its presence is what
 	// makes submission idempotent: a row that has one is never submitted again.
 	RunPodID string `json:"runpod_id,omitempty"`
@@ -147,6 +153,7 @@ const columns = `
 	       COALESCE(j.voice_id, 0), COALESCE(v.name, ''), COALESCE(v.kind, ''),
 	       j.text, COALESCE(j.language, ''), COALESCE(j.params_json, ''),
 	       COALESCE(j.model, ''),
+	       COALESCE(j.alignment_json, ''),
 	       COALESCE(j.runpod_id, ''),
 	       COALESCE(j.audio_path, ''), COALESCE(j.format, ''), COALESCE(j.sample_rate, 0),
 	       COALESCE(j.delay_ms, 0), COALESCE(j.exec_ms, 0),
@@ -357,12 +364,15 @@ func (s *Store) UpdateStatus(ctx context.Context, id int64, status string) error
 }
 
 // MarkReady records completed render details and updates status to ready.
-func (s *Store) MarkReady(ctx context.Context, id int64, audioPath, format string, sampleRate int, delayMS, execMS int64) error {
+// alignmentJSON is the optional word_timings block (JSON) the poller captured
+// from the completed payload; an empty string means the worker omitted it and
+// the player falls back to interpolation.
+func (s *Store) MarkReady(ctx context.Context, id int64, audioPath, format string, sampleRate int, delayMS, execMS int64, alignmentJSON string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE jobs
 		SET status = 'ready', audio_path = ?, format = ?, sample_rate = ?,
-		    delay_ms = ?, exec_ms = ?, error = NULL, updated_at = datetime('now')
-		WHERE id = ? AND status != 'ready'`, audioPath, format, sampleRate, delayMS, execMS, id)
+		    delay_ms = ?, exec_ms = ?, alignment_json = ?, error = NULL, updated_at = datetime('now')
+		WHERE id = ? AND status != 'ready'`, audioPath, format, sampleRate, delayMS, execMS, alignmentJSON, id)
 	if err != nil {
 		return fmt.Errorf("mark job %d ready: %w", id, err)
 	}
@@ -416,6 +426,7 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 			&j.VoiceID, &j.VoiceName, &j.VoiceKind,
 			&j.Text, &j.Language, &j.ParamsJSON,
 			&j.Model,
+			&j.AlignmentJSON,
 			&j.RunPodID,
 			&j.AudioPath, &j.Format, &j.SampleRate,
 			&j.DelayMS, &j.ExecMS,
