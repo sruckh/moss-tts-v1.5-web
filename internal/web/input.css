@@ -64,6 +64,7 @@
   --color-line: color-mix(in srgb, var(--color-ink) 76%, var(--color-paper));
   --color-line-loud: color-mix(in srgb, var(--color-ink) 60%, var(--color-paper));
   --color-text-dim: color-mix(in srgb, var(--color-paper) 62%, var(--color-ink));
+  --color-text-faint: color-mix(in srgb, var(--color-paper) 42%, var(--color-ink));
 }
 
 @layer base {
@@ -104,3 +105,117 @@
   border-color: var(--color-indigo);
   background-color: color-mix(in srgb, var(--color-indigo) 10%, var(--color-ink));
 }
+
+/* ============================================================
+   COMPONENTS — copied to fidelity from index.html, the living
+   reference. Every value is a palette var or a color-mix of two.
+   ============================================================ */
+
+/* Alpine: hide x-cloak elements until Alpine boots. */
+[x-cloak]{display:none !important}
+
+/* ---------- Type helpers ---------- */
+.eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:var(--color-text-faint);margin:0 0 8px}
+.field-label{display:block;font-family:var(--font-mono);font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--color-text-faint);margin-bottom:6px}
+
+/* ---------- Buttons — Indigo is synthesis, one per view ---------- */
+.btn{font-family:var(--font-body);font-size:14px;font-weight:600;letter-spacing:-0.005em;padding:9px 16px;border-radius:var(--radius-control);border:1px solid transparent;background:var(--color-indigo);color:var(--color-paper);cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:background .14s ease,border-color .14s ease,color .14s ease;text-decoration:none}
+.btn:hover{background:color-mix(in srgb, var(--color-indigo) 85%, var(--color-paper))}
+.btn:active{background:color-mix(in srgb, var(--color-indigo) 82%, var(--color-ink))}
+.btn--secondary{background:transparent;border-color:var(--color-line-loud);color:var(--color-paper)}
+.btn--secondary:hover{background:var(--color-surface-2);border-color:var(--color-text-dim)}
+.btn--quiet{background:transparent;color:var(--color-text-dim);padding-inline:10px}
+.btn--quiet:hover{background:var(--color-surface-2);color:var(--color-paper)}
+.btn--danger{background:transparent;border-color:var(--color-burnt);color:var(--color-burnt)}
+.btn--danger:hover{background:color-mix(in srgb, var(--color-burnt) 16%, var(--color-ink));color:var(--color-paper)}
+.btn--sm{font-size:12.5px;padding:6px 11px}
+.btn[disabled]{opacity:.4;cursor:not-allowed}
+
+/* ---------- Badges — one component, two axes; word + color ---------- */
+.badge{font-family:var(--font-mono);font-size:10.5px;letter-spacing:0.07em;text-transform:uppercase;padding:3px 8px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;white-space:nowrap}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.badge--ready{background:color-mix(in srgb, var(--color-green) 16%, var(--color-ink));color:var(--color-green);border-color:color-mix(in srgb, var(--color-green) 45%, transparent)}
+.badge--working{background:color-mix(in srgb, var(--color-amber) 16%, var(--color-ink));color:var(--color-amber);border-color:color-mix(in srgb, var(--color-amber) 45%, transparent)}
+.badge--limit{background:color-mix(in srgb, var(--color-burnt) 16%, var(--color-ink));color:var(--color-burnt);border-color:color-mix(in srgb, var(--color-burnt) 45%, transparent)}
+.badge--queued{background:color-mix(in srgb, var(--color-teal) 20%, var(--color-ink));color:color-mix(in srgb, var(--color-teal) 62%, var(--color-paper));border-color:color-mix(in srgb, var(--color-teal) 55%, transparent)}
+.badge--cloned{background:color-mix(in srgb, var(--color-purple) 22%, var(--color-ink));color:color-mix(in srgb, var(--color-purple) 45%, var(--color-paper));border-color:color-mix(in srgb, var(--color-purple) 60%, transparent)}
+.badge--live{background:color-mix(in srgb, var(--color-olive) 14%, var(--color-ink));color:var(--color-olive);border-color:color-mix(in srgb, var(--color-olive) 45%, transparent)}
+
+/* ---------- Fields ---------- */
+.input{width:100%;background:var(--color-surface-2);border:1px solid var(--color-line);color:var(--color-paper);border-radius:var(--radius-control);padding:10px 12px;font-family:var(--font-body);font-size:14px}
+.input::placeholder{color:var(--color-text-faint)}
+.input:hover{border-color:var(--color-line-loud)}
+select.input{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--color-text-dim) 50%),linear-gradient(135deg,var(--color-text-dim) 50%,transparent 50%);background-position:calc(100% - 17px) 18px,calc(100% - 12px) 18px;background-size:5px 5px;background-repeat:no-repeat}
+.script-input{font-size:19px;line-height:1.85;min-height:118px}
+.help{font-size:12px;color:var(--color-text-faint);margin-top:6px}
+.help--limit{color:var(--color-burnt)}
+
+/* ---------- Range — Indigo fill behind a Paper thumb ringed Indigo ---------- */
+.range{width:100%;appearance:none;height:24px;background:transparent;cursor:pointer}
+.range::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(to right, var(--color-indigo) var(--fill,50%), var(--color-line) var(--fill,50%))}
+.range::-moz-range-track{height:4px;border-radius:999px;background:var(--color-line)}
+.range::-moz-range-progress{height:4px;border-radius:999px;background:var(--color-indigo)}
+.range::-webkit-slider-thumb{appearance:none;width:14px;height:14px;margin-top:-5px;border-radius:50%;background:var(--color-paper);border:3px solid var(--color-indigo)}
+.range::-moz-range-thumb{width:14px;height:14px;border:3px solid var(--color-indigo);border-radius:50%;background:var(--color-paper)}
+.range-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px}
+.range-val{font-family:var(--font-mono);font-size:12px;color:var(--color-paper);font-variant-numeric:tabular-nums}
+
+/* ---------- Toggle — Green when on, because on is permission ---------- */
+.sw-toggle{display:inline-flex;align-items:center;gap:12px;cursor:pointer}
+.sw-toggle input{position:absolute;opacity:0;width:0;height:0}
+.sw-toggle .track{width:38px;height:22px;border-radius:999px;background:var(--color-surface-3);border:1px solid var(--color-line-loud);position:relative;transition:background .16s ease,border-color .16s ease;flex:none}
+.sw-toggle .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--color-text-faint);transition:transform .16s ease,background .16s ease}
+.sw-toggle input:checked + .track{background:color-mix(in srgb, var(--color-green) 16%, var(--color-ink));border-color:var(--color-green)}
+.sw-toggle input:checked + .track .knob{transform:translateX(16px);background:var(--color-green)}
+.sw-toggle input:focus-visible + .track{outline:2px solid var(--color-olive);outline-offset:2px}
+
+/* ---------- Character meter — Olive, under the script editor ---------- */
+.count{display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-family:var(--font-mono);font-size:11.5px;color:var(--color-text-faint)}
+.meter{height:3px;background:var(--color-line);border-radius:999px;overflow:hidden;margin-top:8px}
+.meter i{display:block;height:100%;background:var(--color-olive)}
+
+/* ---------- Masthead spectrum — animation 2 of 3 (3.2s ambient) ---------- */
+.spectrum{display:flex;gap:3px;height:64px;align-items:flex-end;margin-bottom:24px}
+.spectrum i{flex:1;border-radius:2px 2px 0 0;transform-origin:bottom;animation:lvl 3.2s ease-in-out infinite}
+@keyframes lvl{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.62)}}
+@media (prefers-reduced-motion:reduce){.spectrum i{animation:none}}
+
+/* ---------- Render spinner — animation 3 of 3 (0.7s) ---------- */
+.spin{width:12px;height:12px;border-radius:50%;border:2px solid color-mix(in srgb, var(--color-paper) 30%, transparent);border-top-color:var(--color-paper);animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
+
+/* ---------- The spoken line (signature) — played Teal, playhead Olive ---------- */
+.player{background:var(--color-surface-1);border:1px solid var(--color-line);border-radius:var(--radius-container);overflow:hidden}
+.player-bar{display:flex;align-items:center;gap:16px;padding:16px 24px;border-bottom:1px solid var(--color-line)}
+.play{width:42px;height:42px;flex:none;border-radius:50%;border:0;background:var(--color-indigo);color:var(--color-paper);cursor:pointer;display:grid;place-items:center}
+.play:hover{background:color-mix(in srgb, var(--color-indigo) 85%, var(--color-paper))}
+.wave{flex:1;display:flex;align-items:center;gap:2px;height:52px;min-width:0}
+.wave i{flex:1;border-radius:999px;background:var(--color-line-loud);transition:background .12s linear}
+.wave i.past{background:var(--color-teal)}
+.wave i.now{background:var(--color-olive)}
+.time{font-family:var(--font-mono);font-size:12px;color:var(--color-text-dim);font-variant-numeric:tabular-nums;flex:none}
+.script{padding:24px;font-size:19px;line-height:1.85;font-family:var(--font-body)}
+.script .wd{color:var(--color-text-faint);transition:color .1s linear,background .1s linear;padding:1px 0;border-radius:var(--radius-chip)}
+.script .wd.said{color:var(--color-text-dim)}
+.script .wd.now{color:var(--color-ink);background:var(--color-olive);box-shadow:0 0 0 3px var(--color-olive)}
+.player-foot{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:12px 24px;border-top:1px solid var(--color-line);background:var(--color-surface-2)}
+
+/* ---------- Render queue table ---------- */
+.queue-table{width:100%;border-collapse:collapse;font-size:13.5px}
+.queue-table th{font-family:var(--font-mono);font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;color:var(--color-text-faint);text-align:left;font-weight:400;padding:0 12px 8px}
+.queue-table td{padding:12px;border-top:1px solid var(--color-line);vertical-align:middle}
+.queue-table td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;color:var(--color-text-dim)}
+
+/* ---------- Messages — status colors, 3px left border, 16% tint ---------- */
+.alert{display:flex;gap:12px;padding:12px 16px;border-radius:var(--radius-control);border-left:3px solid var(--color-line-loud);background:var(--color-surface-2);font-size:13.5px}
+.alert b{font-weight:600;display:block;margin-bottom:2px}
+.alert p{margin:0;color:var(--color-text-dim)}
+.alert--ready{border-left-color:var(--color-green);background:color-mix(in srgb, var(--color-green) 16%, var(--color-ink))}
+.alert--working{border-left-color:var(--color-amber);background:color-mix(in srgb, var(--color-amber) 16%, var(--color-ink))}
+.alert--limit{border-left-color:var(--color-burnt);background:color-mix(in srgb, var(--color-burnt) 16%, var(--color-ink))}
+
+/* ---------- Empty states — invitations, not moods ---------- */
+.empty{text-align:center;padding:48px 24px;border:1px dashed var(--color-line-loud);border-radius:var(--radius-container)}
+.empty h4{font-family:var(--font-display);font-size:19px;font-weight:600;margin:12px 0 8px}
+.empty p{color:var(--color-text-dim);margin:0 auto 16px;max-width:40ch;font-size:14px}

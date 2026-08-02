@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
 
-> **Status: active.** The full backend lifecycle is complete and deployed — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + stock voices + cards), queues renders, submits out-of-band to RunPod, polls for status, decodes & saves completed WAV audio files, streams downloads, and handles job deletions. The full studio UI (Phase 6) is the final piece. [What works today](#what-works-today) is exact.
+> **Status: complete.** The whole product is built and deployed at [timbre.gemneye.xyz](https://timbre.gemneye.xyz) — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), decodes & saves completed WAV audio files, streams downloads, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards, a live render queue, and spoken-line playback. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -33,16 +33,18 @@ Two consequences worth knowing before you read the code:
 | ✅ Secrets injected from Infisical at container start | No secrets in the repo |
 | ✅ Multi-stage Docker build — templ + Tailwind + `go build`, no host toolchain | `docker compose` only |
 | ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*` requires auth | Done |
-| ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock-voice seed (Chatterbox · MIT, Qwen3-TTS · Apache-2.0, Higgs Audio v2 · Apache-2.0), `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
+| ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock seed of the MOSS-TTS v1.5 default voice, cloned voices from uploaded references, `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
 | ✅ Job queue — authenticated `POST /jobs` inserts a `queued` row and returns the queue fragment; `GET /queue` and `GET /jobs` render it | Done |
 | ✅ RunPod submission worker — goroutine started at boot, drains queued jobs under `TIMBRE_MAX_IN_FLIGHT`, POSTs `/run`, stores the returned id, flips to `submitted`/`in_progress`. Submission is idempotent per job and never runs on a browser request | Done |
 | ✅ `GET /health` — session-gated probe of the RunPod endpoint's worker pool and queue depth | Done |
 | ✅ RunPod status poller & audio capture — polls `/status/{id}`, decodes `audio_base64` on `COMPLETED` to WAV, saves to storage volume (`/data/audio/renders/`), and updates job state to `ready` (or `failed`) | Done |
 | ✅ Audio download & job delete routes — authenticated `GET /jobs/{id}/audio` streams WAV file; `DELETE /jobs/{id}` removes DB row and audio file from volume | Done |
 | ✅ Queue status polling — HTMX `hx-trigger="every 2s"` auto-refreshes queue status in the browser | Done |
-| ⬜ The studio UI (Phase 6) | Next |
+| ✅ Studio UI at `/` — script editor with character meter, parameter fields (Seed, Pace, Pitch, Expressiveness, output toggles), voice-card library, live render-queue table, spoken-line playback with Download WAV | Done |
+| ✅ Palette-exhaustive test — `internal/web/palette_test.go` fails if any color outside the 10 palette hexes appears in compiled CSS or rendered HTML | Enforced in `go test` |
+| ✅ Favicon set — apple-touch-icon, PNG icons, manifest, all embedded and served under `/static/` | Done |
 
-The complete RunPod rendering lifecycle is functional: submission worker enqueues jobs, status poller checks `/status/{id}`, saves completed WAV audio files to the storage volume, and serves downloads or handles deletions cleanly.
+The complete product is live: paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with the queue, submission, polling, and storage owned by the app.
 
 ## Quick start
 
@@ -117,7 +119,7 @@ Olive is the brightest value against Ink, so it marks the word being spoken *rig
 - [`DESIGN.md`](./DESIGN.md) — the full system: palette rationale, measured contrast, type scale, components.
 - [`index.html`](./index.html) — the living reference; the system rendered in itself.
 
-The build compiles `internal/web/input.css` to `app.css` with the Tailwind v4 CLI and **does not minify it**, deliberately: the minifier folds `color-mix()` into computed hexes, which would put colors in the output that belong to no palette.
+The build compiles `internal/web/input.css` to `app.css` with the Tailwind v4 CLI and **does not minify it**, deliberately: the minifier folds `color-mix()` into computed hexes, which would put colors in the output that belong to no palette. The rule is enforced mechanically — `internal/web/palette_test.go` scans the compiled CSS and the rendered HTML of every page and fails the suite if a foreign hex appears (Tailwind's own `--tw-*`/`@property` boilerplate excluded).
 
 ## Layout
 
@@ -126,12 +128,12 @@ cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
-internal/server/     chi router, login/logout, /healthz + /health, /voices + upload, /queue + /jobs + audio download & delete, static assets
-internal/voices/     voice library: stock-voice seed, reference upload, blob storage + read-back
+internal/server/     chi router, login/logout, /healthz + /health, / studio, /voices + upload, /queue + /jobs + audio download & delete, static assets
+internal/voices/     voice library: MOSS default-voice seed (single-model contract), reference upload, blob storage + read-back
 internal/jobs/       jobs table: enqueue + validation, claim/submit/fail state transitions, audio metadata & deletion
-internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, permanent-vs-transient errors
+internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, output decoded as object-or-aggregate-array, permanent-vs-transient errors
 internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
-internal/web/        templ layout + login + voice library + queue + Tailwind theme (compiled CSS is embedded)
+internal/web/        templ app shell + studio + login + voice library + queue + playback, Tailwind theme, favicons, palette test (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), sync-generated.sh (LSP support)
 ```

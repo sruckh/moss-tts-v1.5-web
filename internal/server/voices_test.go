@@ -70,8 +70,8 @@ func TestVoiceLibraryRenders(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Voice library",
-		"Chatterbox", "Qwen3-TTS", "Higgs Audio v2", // stock models
-		"Commercial-safe", // license badge
+		"MOSS-TTS v1.5",     // the one model this rack runs
+		"OpenMOSS Community", // its license badge, informational
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("library view missing %q", want)
@@ -100,17 +100,11 @@ func TestVoiceLibraryJSON(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &vs); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(vs) != 3 {
-		t.Fatalf("len = %d, want 3 stock voices", len(vs))
+	if len(vs) != 1 {
+		t.Fatalf("len = %d, want the single stock voice (the MOSS default)", len(vs))
 	}
-	names := map[string]bool{}
-	for _, v := range vs {
-		names[v.Name] = true
-	}
-	for _, want := range []string{"Ash", "Vellum", "Slate"} {
-		if !names[want] {
-			t.Errorf("missing stock voice %q in JSON", want)
-		}
+	if vs[0].Name != "Moss" || vs[0].Model != "MOSS-TTS v1.5" {
+		t.Errorf("stock voice = %q (%q), want Moss (MOSS-TTS v1.5)", vs[0].Name, vs[0].Model)
 	}
 }
 
@@ -149,8 +143,8 @@ func TestVoiceUploadAuthenticated(t *testing.T) {
 	if !strings.Contains(body, "narrator") {
 		t.Errorf("grid missing the uploaded clone name; body=%s", body)
 	}
-	if !strings.Contains(body, "Chatterbox") {
-		t.Errorf("grid dropped the stock voices; body=%s", body)
+	if !strings.Contains(body, "MOSS-TTS v1.5") {
+		t.Errorf("grid dropped the stock voice; body=%s", body)
 	}
 }
 

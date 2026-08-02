@@ -23,6 +23,28 @@ const queueLimit = 50
 // handler defaults to 4096; a larger value only buys a longer render.
 const maxNewTokensCeiling = 8192
 
+// handleStudio renders the primary studio view at /: compose card, voice
+// library, live queue and the playback spoken line in one page.
+func (s *Server) handleStudio(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	items, err := s.jobs.ListForUser(r.Context(), userID, queueLimit)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	available, err := s.voices.List(r.Context())
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	_ = web.Studio(items, available, audioDurations(items)).Render(r.Context(), w)
+}
+
 // handleQueuePage renders the compose form and the current queue.
 func (s *Server) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := s.auth.UserID(r)
@@ -41,7 +63,7 @@ func (s *Server) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	_ = web.QueuePage(items, available).Render(r.Context(), w)
+	_ = web.QueuePage(items, available, audioDurations(items)).Render(r.Context(), w)
 }
 
 // handleQueue answers GET /jobs with the queue fragment (or the row list, for
@@ -148,22 +170,96 @@ func (s *Server) renderQueue(w http.ResponseWriter, r *http.Request, items []job
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = web.Queue(items, justQueued).Render(r.Context(), w)
+	_ = web.Queue(items, justQueued, audioDurations(items)).Render(r.Context(), w)
+}
+
+// audioDurations labels ready jobs' audio length ("0:06.02") from the saved
+// WAV's byte size — a 44-byte header, then 16-bit mono samples at the recorded
+// rate. Jobs whose file is missing simply get no label and render a dash.
+func audioDurations(items []jobs.Job) map[int64]string {
+	out := map[int64]string{}
+	for _, j := range items {
+		if j.Status != jobs.StatusReady || j.AudioPath == "" {
+			continue
+		}
+		info, err := os.Stat(j.AudioPath)
+		if err != nil {
+			continue
+		}
+		rate := j.SampleRate
+		if rate <= 0 {
+			rate = 24000
+		}
+		secs := float64(info.Size()-44) / float64(rate*2)
+		if secs < 0 {
+			continue
+		}
+		mins := int(secs) / 60
+		out[j.ID] = fmt.Sprintf("%d:%05.2f", mins, secs-float64(mins*60))
+	}
+	return out
 }
 
 // parseJobParams reads the optional generation parameters into the map stored
-// as params_json and merged into the RunPod input at submit time.
+// as params_json and merged into the RunPod input at submit time. The studio's
+// parameter fields — seed, pace, pitch, expressiveness and the output toggles —
+// all land here; every one is validated so a bad value answers 400 rather than
+// silently reaching the endpoint.
 func parseJobParams(r *http.Request) (map[string]any, error) {
-	raw := strings.TrimSpace(r.PostFormValue("max_new_tokens"))
-	if raw == "" {
+	params := map[string]any{}
+
+	if raw := strings.TrimSpace(r.PostFormValue("max_new_tokens")); raw != "" {
+		tokens, err := strconv.Atoi(raw)
+		if err != nil || tokens < 1 || tokens > maxNewTokensCeiling {
+			return nil, errors.New("max_new_tokens must be a number between 1 and " +
+				strconv.Itoa(maxNewTokensCeiling))
+		}
+		params["max_new_tokens"] = tokens
+	}
+
+	if raw := strings.TrimSpace(r.PostFormValue("seed")); raw != "" {
+		seed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || seed < 0 {
+			return nil, errors.New("seed must be a non-negative number")
+		}
+		params["seed"] = seed
+	}
+
+	if raw := strings.TrimSpace(r.PostFormValue("pace")); raw != "" {
+		pace, err := strconv.ParseFloat(raw, 64)
+		if err != nil || pace < 0.5 || pace > 2 {
+			return nil, errors.New("pace must be between 0.5 and 2")
+		}
+		params["pace"] = pace
+	}
+
+	if raw := strings.TrimSpace(r.PostFormValue("pitch")); raw != "" {
+		pitch, err := strconv.Atoi(raw)
+		if err != nil || pitch < -12 || pitch > 12 {
+			return nil, errors.New("pitch must be between -12 and 12 semitones")
+		}
+		params["pitch"] = pitch
+	}
+
+	if raw := strings.TrimSpace(r.PostFormValue("expressiveness")); raw != "" {
+		expr, err := strconv.ParseFloat(raw, 64)
+		if err != nil || expr < 0 || expr > 1 {
+			return nil, errors.New("expressiveness must be between 0 and 1")
+		}
+		params["expressiveness"] = expr
+	}
+
+	if r.PostFormValue("normalize") != "" {
+		params["normalize"] = true
+	}
+	if r.PostFormValue("output_48k") != "" {
+		params["output_48k"] = true
+	}
+
+	if len(params) == 0 {
 		return nil, nil
 	}
-	tokens, err := strconv.Atoi(raw)
-	if err != nil || tokens < 1 || tokens > maxNewTokensCeiling {
-		return nil, errors.New("max_new_tokens must be a number between 1 and " +
-			strconv.Itoa(maxNewTokensCeiling))
-	}
-	return map[string]any{"max_new_tokens": tokens}, nil
+	return params, nil
 }
 
 

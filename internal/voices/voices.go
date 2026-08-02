@@ -1,8 +1,8 @@
-// Package voices owns the voice library: stock models seeded at startup and
-// one-shot-cloned references uploaded by the user. Reference audio is stored as
-// a blob on disk (under the configured audio directory) and read back at submit
-// time, where the worker base64-encodes it into the RunPod payload. Reference
-// bytes are never served over HTTP.
+// Package voices owns the voice library: the stock default voice seeded at
+// startup and one-shot-cloned references uploaded by the user. Reference audio
+// is stored as a blob on disk (under the configured audio directory) and read
+// back at submit time, where the worker base64-encodes it into the RunPod
+// payload. Reference bytes are never served over HTTP.
 package voices
 
 import (
@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -25,15 +26,17 @@ const (
 	KindCloned = "cloned"
 )
 
-// stockVoices are seeded into an empty library on startup: three open-weights
-// models so the UI and a render can be exercised without an upload.
-// LicenseLabel is the SPDX id; the card renders "model · license".
+// stockVoices are seeded into an empty library on startup. There is exactly
+// one inference backend — the MOSS-TTS v1.5 RunPod endpoint — and its input
+// schema has no model or voice field: with no reference audio the endpoint
+// renders its built-in default voice, and voice identity beyond that comes
+// only from a cloned reference. So the one stock voice is the MOSS default
+// voice; everything else in the library is a user clone.
+// LicenseLabel is what the card renders after the model name.
 var stockVoices = []struct {
 	Name, Model, License string
 }{
-	{"Ash", "Chatterbox", "MIT"},
-	{"Vellum", "Qwen3-TTS", "Apache-2.0"},
-	{"Slate", "Higgs Audio v2", "Apache-2.0"},
+	{"Moss", "MOSS-TTS v1.5", "OpenMOSS Community"},
 }
 
 // ErrNotFound is returned when no voice matches the query.
@@ -118,10 +121,16 @@ func (s *Store) CreateCloned(ctx context.Context, name, ext string, data []byte)
 	return id, nil
 }
 
-// SeedStock inserts the built-in stock voices that are not already present. It
-// is idempotent: safe on every boot and tolerant of a partially seeded table.
+// SeedStock inserts the built-in stock voices that are not already present and
+// removes stock rows that are no longer in the seed list. It is idempotent:
+// safe on every boot and tolerant of a partially seeded table. The delete is
+// what reconciles earlier seeds (whose model names predated the single-model
+// MOSS-TTS v1.5 contract) — jobs referencing a removed voice keep their
+// history because the FK is ON DELETE SET NULL.
 func (s *Store) SeedStock(ctx context.Context) error {
+	keep := make([]string, 0, len(stockVoices))
 	for _, sv := range stockVoices {
+		keep = append(keep, sv.Name)
 		var exists int
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM voices WHERE kind = 'stock' AND name = ?`, sv.Name).Scan(&exists); err != nil {
@@ -134,6 +143,34 @@ func (s *Store) SeedStock(ctx context.Context) error {
 			INSERT INTO voices (kind, name, model, license_label)
 			VALUES ('stock', ?, ?, ?)`, sv.Name, sv.Model, sv.License); err != nil {
 			return fmt.Errorf("seed stock %q: %w", sv.Name, err)
+		}
+	}
+
+	// Every stock row not in the current seed is stale.
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM voices WHERE kind = 'stock'`)
+	if err != nil {
+		return fmt.Errorf("seed reconcile list: %w", err)
+	}
+	var stale []string
+	func() {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return
+			}
+			if !slices.Contains(keep, name) {
+				stale = append(stale, name)
+			}
+		}
+	}()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("seed reconcile list: %w", err)
+	}
+	for _, name := range stale {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM voices WHERE kind = 'stock' AND name = ?`, name); err != nil {
+			return fmt.Errorf("seed reconcile delete %q: %w", name, err)
 		}
 	}
 	return nil

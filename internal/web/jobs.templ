@@ -7,29 +7,32 @@ import (
 	"github.com/sruckh/timbre/internal/voices"
 )
 
-// statusClasses colors a queue row's badge from the palette's status meanings:
-// Teal is queued/information, Amber is work in progress, Green is ready, Burnt
-// is failed. Color is the second signal — the word always carries the meaning.
-func statusClasses(status string) string {
+// statusBadgeClass colors a queue row's badge from the palette's render-state
+// axis: Teal is queued, Amber is work that resolves on its own (warming the
+// GPU, rendering), Green is ready, Burnt is failed. Color is the second
+// signal — the word always carries the meaning.
+func statusBadgeClass(status string) string {
 	switch status {
 	case jobs.StatusReady:
-		return "bg-green/16 text-green border-green/45"
+		return "badge--ready"
 	case jobs.StatusFailed:
-		return "bg-burnt/16 text-burnt border-burnt/45"
+		return "badge--limit"
 	case jobs.StatusSubmitted, jobs.StatusInProgress:
-		return "bg-amber/16 text-amber border-amber/45"
+		return "badge--working"
 	default:
-		return "bg-teal/16 text-teal border-teal/45"
+		return "badge--queued"
 	}
 }
 
-// statusLabel is the human wording for a job status.
+// statusLabel is the human wording for a job status. A submitted job is still
+// waiting on a warm worker — "Warming GPU" — which DESIGN.md names as its own
+// state rather than a disguised spinner.
 func statusLabel(status string) string {
 	switch status {
 	case jobs.StatusQueued:
 		return "Queued"
 	case jobs.StatusSubmitted:
-		return "Submitted"
+		return "Warming GPU"
 	case jobs.StatusInProgress:
 		return "Rendering"
 	case jobs.StatusReady:
@@ -62,13 +65,32 @@ func voiceLabel(j jobs.Job) string {
 	return j.VoiceName
 }
 
+// lengthLabel is the take's audio length ("0:06.02") once rendered, computed
+// from the saved WAV by the handler; anything not ready reports a dash.
+func lengthLabel(j jobs.Job, durations map[int64]string) string {
+	if j.Status == jobs.StatusReady {
+		if d := durations[j.ID]; d != "" {
+			return d
+		}
+	}
+	return "—"
+}
+
+// gpuLabel reports what the render cost in GPU seconds.
+func gpuLabel(j jobs.Job) string {
+	if j.ExecMS > 0 {
+		return strconv.FormatFloat(float64(j.ExecMS)/1000, 'f', 1, 64) + " s"
+	}
+	return "—"
+}
+
 // Queue is the swap target: the whole queue, returned by both GET /jobs and
-// POST /jobs so HTMX can refresh it in place. Its root carries id="queue".
+// POST /jobs so HTMX can refresh it in place. Its root carries id="queue" and
+// polls every 2s — the browser never talks to RunPod, only to this fragment.
 //
 // justQueued is the id of a job enqueued by the request being answered; it
-// drives the "queued" confirmation line and highlights the new row. Pass 0 when
-// nothing was just added.
-templ Queue(items []jobs.Job, justQueued int64) {
+// drives the "enqueue succeeded" message. Pass 0 when nothing was just added.
+templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string) {
 	<div
 		id="queue"
 		hx-get="/jobs"
@@ -77,150 +99,102 @@ templ Queue(items []jobs.Job, justQueued int64) {
 		class="flex flex-col gap-3"
 	>
 		if justQueued > 0 {
-			<p
-				role="status"
-				class="rounded-control border border-teal/45 bg-teal/16 px-3 py-2 font-mono text-[11px] uppercase tracking-[0.07em] text-teal"
-			>
-				Enqueue succeeded — job { strconv.FormatInt(justQueued, 10) } queued
-			</p>
+			<div class="alert alert--ready" role="status">
+				<div>
+					<b>Enqueue succeeded</b>
+					<p>Job { strconv.FormatInt(justQueued, 10) } queued — the worker picks it up within a couple of seconds.</p>
+				</div>
+			</div>
 		}
 		if len(items) == 0 {
-			<p class="rounded-container border border-line bg-surface-1 p-4 text-text-dim">
-				Nothing in the queue. Write a script and pick a voice to render one.
-			</p>
+			<div class="empty">
+				<span class="badge badge--live"><span class="dot"></span> Nothing rendered yet</span>
+				<h4>The queue is quiet</h4>
+				<p>Write a script, pick a voice, and render your first take — it lands here.</p>
+			</div>
 		} else {
-			for _, j := range items {
-				@queueRow(j, j.ID == justQueued)
-			}
+			<div class="overflow-x-auto rounded-container border border-line bg-surface-1 p-4">
+				<table class="queue-table">
+					<thead>
+						<tr>
+							<th>Take</th>
+							<th>Voice</th>
+							<th>State</th>
+							<th>Length</th>
+							<th>GPU</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, j := range items {
+							@queueRow(j, durations)
+						}
+					</tbody>
+				</table>
+			</div>
 		}
 	</div>
 }
 
-// queueRow is one job: status badge, voice, and the script excerpt. A failed
-// job also shows the recorded reason, which is the only place the user learns
-// that e.g. the endpoint rejected the credential.
-templ queueRow(j jobs.Job, fresh bool) {
-	<article
-		id={ "job-" + strconv.FormatInt(j.ID, 10) }
-		class={ "flex flex-col gap-2 rounded-container border bg-surface-1 p-4",
-			templ.KV("border-indigo", fresh), templ.KV("border-line", !fresh) }
-	>
-		<div class="flex items-start justify-between gap-3">
-			<div class="min-w-0">
-				<div class="font-display text-[15px] font-semibold tracking-[-0.015em] text-paper">
-					{ voiceLabel(j) }
-				</div>
-				<div class="mt-0.5 font-mono text-[11px] text-text-dim">
-					Job { strconv.FormatInt(j.ID, 10) }
-					if j.Language != "" {
-						{ " · " + j.Language }
-					}
-				</div>
-			</div>
-			<span class={ "inline-flex shrink-0 items-center rounded-full border px-2 py-[3px] font-mono text-[10.5px] uppercase tracking-[0.07em]", statusClasses(j.Status) }>
+// queueRow is one job: take, voice, state badge, length and GPU cost. A ready
+// job carries its Download WAV control; a failed job shows the recorded reason
+// in Burnt — the only place the user learns why.
+templ queueRow(j jobs.Job, durations map[int64]string) {
+	<tr id={ "job-" + strconv.FormatInt(j.ID, 10) }>
+		<td class="max-w-[36ch]">
+			<div class="font-display text-[14px] font-semibold tracking-[-0.01em]">Take { strconv.FormatInt(j.ID, 10) }</div>
+			<div class="mt-0.5 truncate text-[12px] text-text-dim">{ excerpt(j.Text) }</div>
+			if j.Status == jobs.StatusFailed && j.Error != "" {
+				<div class="mt-1 font-mono text-[11px] text-burnt">{ j.Error }</div>
+			}
+		</td>
+		<td class="text-text-dim">{ voiceLabel(j) }</td>
+		<td>
+			<span class={ "badge", statusBadgeClass(j.Status) }>
+				<span class="dot"></span>
 				{ statusLabel(j.Status) }
 			</span>
-		</div>
-		<p class="text-text-dim">{ excerpt(j.Text) }</p>
-		if j.Status == jobs.StatusFailed && j.Error != "" {
-			<p class="font-mono text-[11px] text-burnt">{ j.Error }</p>
-		}
-		<div class="mt-2 flex flex-wrap items-center justify-between gap-2">
-			if j.Status == jobs.StatusReady {
-				<a
-					href={ "/jobs/" + strconv.FormatInt(j.ID, 10) + "/audio" }
-					download
-					class="inline-flex items-center gap-1.5 rounded-control border border-green/45 bg-green/16 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.07em] text-green hover:bg-green/24"
-				>
-					Download WAV
-				</a>
-			} else {
-				<div></div>
-			}
-			<button
-				type="button"
-				hx-delete={ "/jobs/" + strconv.FormatInt(j.ID, 10) }
-				hx-target="#queue"
-				hx-swap="outerHTML"
-				class="cursor-pointer rounded-control border border-burnt/45 bg-burnt/16 px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.07em] text-burnt hover:bg-burnt/24"
-			>
-				Delete
-			</button>
-		</div>
-	</article>
+		</td>
+		<td class="num">{ lengthLabel(j, durations) }</td>
+		<td class="num">{ gpuLabel(j) }</td>
+		<td class="whitespace-nowrap">
+			<div class="flex items-center gap-2">
+				if j.Status == jobs.StatusReady {
+					<a
+						href={ templ.SafeURL("/jobs/" + strconv.FormatInt(j.ID, 10) + "/audio") }
+						download
+						class="btn btn--quiet btn--sm"
+					>Download WAV</a>
+				}
+				<button
+					type="button"
+					hx-delete={ "/jobs/" + strconv.FormatInt(j.ID, 10) }
+					hx-target="#queue"
+					hx-swap="outerHTML"
+					hx-confirm={ "Delete take " + strconv.FormatInt(j.ID, 10) + "? The WAV goes with it." }
+					class="btn btn--danger btn--sm"
+				>Delete</button>
+			</div>
+		</td>
+	</tr>
 }
 
-// QueuePage is a working page for the enqueue path: a compose form wired to
-// POST /jobs by HTMX, plus the queue itself. Deliberately plain — the real
-// composer (script editor, parameter sliders, transport) is built in the UI
-// goal against DESIGN.md.
-templ QueuePage(items []jobs.Job, available []voices.Voice) {
-	@Layout("Queue · Timbre") {
-		<main class="mx-auto max-w-3xl p-8">
-			<header class="mb-6">
-				<p class="font-mono text-[11px] uppercase tracking-[0.14em] text-text-dim">Render queue</p>
-				<h1 class="mt-1 font-display text-3xl font-extrabold tracking-[-0.02em] text-paper">Queue a render</h1>
-				<p class="mt-2 max-w-2xl text-text-dim">
-					Queued jobs are submitted to the synthesizer by a background worker — nothing
-					here waits on the render, so a long job never ties up the page.
-				</p>
-			</header>
-			@composeForm(available)
-			<section class="mt-6">
-				<h2 class="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-text-dim">Queue</h2>
-				@Queue(items, 0)
-			</section>
-		</main>
+// QueuePage is the standalone queue view: the same compose card as the studio
+// plus the live queue table.
+templ QueuePage(items []jobs.Job, available []voices.Voice, durations map[int64]string) {
+	@AppShell("Queue · Timbre", "queue") {
+		<header class="pb-8">
+			<p class="eyebrow">Render queue</p>
+			<h1 class="font-display text-[26px] font-semibold tracking-[-0.02em]">Queue a render</h1>
+			<p class="mt-2 max-w-[62ch] text-text-dim">
+				Queued jobs are submitted to the synthesizer by a background worker — nothing
+				here waits on the render, so a long job never ties up the page.
+			</p>
+		</header>
+		@Compose(available, firstVoiceID(available))
+		<section class="mt-8">
+			@Queue(items, 0, durations)
+		</section>
+		@studioHelpers()
 	}
-}
-
-// composeForm posts to /jobs and swaps the returned queue fragment in place.
-templ composeForm(available []voices.Voice) {
-	<form
-		hx-post="/jobs"
-		hx-target="#queue"
-		hx-swap="outerHTML"
-		class="flex flex-col gap-3 rounded-container border border-line bg-surface-1 p-4"
-	>
-		<label class="flex flex-col gap-1">
-			<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Script</span>
-			<textarea
-				name="text"
-				rows="5"
-				required
-				maxlength={ strconv.Itoa(jobs.MaxTextRunes) }
-				placeholder="Paste the script to render…"
-				class="rounded-control border border-line bg-ink p-3 text-paper placeholder:text-text-dim"
-			></textarea>
-		</label>
-		<div class="flex flex-wrap gap-3">
-			<label class="flex flex-1 flex-col gap-1">
-				<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Voice</span>
-				<select
-					name="voice_id"
-					required
-					class="rounded-control border border-line bg-ink p-2 text-paper"
-				>
-					for _, v := range available {
-						<option value={ strconv.FormatInt(v.ID, 10) }>{ v.Name }</option>
-					}
-				</select>
-			</label>
-			<label class="flex flex-1 flex-col gap-1">
-				<span class="font-mono text-[11px] uppercase tracking-[0.07em] text-text-dim">Language (optional)</span>
-				<input
-					type="text"
-					name="language"
-					placeholder="auto-detect"
-					class="rounded-control border border-line bg-ink p-2 text-paper placeholder:text-text-dim"
-				/>
-			</label>
-		</div>
-		<button
-			type="submit"
-			class="self-start cursor-pointer rounded-control bg-indigo px-4 py-2 font-display font-semibold text-paper"
-		>
-			Queue render
-		</button>
-	</form>
 }

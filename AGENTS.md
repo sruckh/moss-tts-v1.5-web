@@ -35,8 +35,11 @@ reference, rendered in itself.
   browser UI — nothing about reference audio depends on it.
 - **The voice library lives in `internal/voices`.** `internal/voices.Store` owns
   the `voices` table and the reference-audio blobs on the `TIMBRE_AUDIO_DIR`
-  volume (`refs/<rand>.<ext>`). On startup it seeds three stock voices
-  (Chatterbox/MIT, Qwen3-TTS/Apache-2.0, Higgs Audio v2/Apache-2.0) idempotently.
+  volume (`refs/<rand>.<ext>`). On startup it seeds one stock voice —
+  **Moss, the MOSS-TTS v1.5 default voice** (no reference audio; the endpoint
+  renders its built-in voice) — and reconciles away any stale stock rows. The
+  endpoint has exactly one model, so voice identity beyond the default comes
+  only from cloned references.
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
   extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row, and
@@ -58,6 +61,20 @@ reference, rendered in itself.
   `/healthz`, `/static/*`. Everything else 302s to `/login` (401 for HTMX/JSON).
 - **The palette is exhaustive**: exactly the ten hexes in `DESIGN.md`. New
   values only ever come from `color-mix()` of two of them.
+- **`/` is the studio.** `internal/web/studio.templ` renders the primary view
+  (masthead spectrum, compose card with script editor + parameter fields,
+  voice library, live queue table, playback "spoken line") inside the
+  `AppShell` rail in `layout.templ`; `/voices` and `/queue` are the same
+  components standalone. The queue fragment (`id="queue"`) polls
+  `GET /jobs` every 2s via HTMX; `POST /jobs` accepts the studio's parameter
+  fields (`seed`, `pace`, `pitch`, `expressiveness`, `normalize`,
+  `output_48k`, plus `max_new_tokens`) into `params_json`, validated 400 on
+  bad values. The queue's Length column and the player derive audio duration
+  from the saved WAV's byte size (`audioDurations` in
+  `internal/server/jobs.go`). The frontend is templ + HTMX v4 (ESM from
+  jsdelivr) + Alpine 3 + Tailwind v4; component CSS (badges, buttons, range,
+  toggle, spoken line, alerts, empty states) lives in
+  `internal/web/input.css`, copied to fidelity from `index.html`.
 
 ## Work Guidance
 
@@ -133,7 +150,10 @@ them.
 
 The only non-palette hexes in `app.css` are Tailwind's own `@property` defaults
 for shadow/ring utilities (`#0000`, `#fff`), which this design never uses —
-exclude `--tw-*` when checking palette exhaustiveness.
+exclude `--tw-*` when checking palette exhaustiveness. That check is automated:
+`internal/web/palette_test.go` fails if any hex outside the ten appears in the
+compiled `app.css` (after stripping `--tw-*`/`@property` boilerplate) or in the
+rendered HTML of any page template.
 
 ## Verification
 

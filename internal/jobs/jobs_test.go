@@ -28,7 +28,7 @@ func newTestStore(t *testing.T) (*Store, int64, int64) {
 	userID := insertRow(t, handle,
 		`INSERT INTO users (username, password_hash) VALUES ('tester', 'x')`)
 	voiceID := insertRow(t, handle,
-		`INSERT INTO voices (kind, name, model, license_label) VALUES ('stock', 'Ash', 'Chatterbox', 'MIT')`)
+		`INSERT INTO voices (kind, name, model, license_label) VALUES ('stock', 'Moss', 'MOSS-TTS v1.5', 'OpenMOSS Community')`)
 
 	return NewStore(handle), userID, voiceID
 }
@@ -78,8 +78,8 @@ func TestEnqueueInsertsQueuedRow(t *testing.T) {
 	if got.Attempts != 0 {
 		t.Errorf("Attempts = %d, want 0", got.Attempts)
 	}
-	if got.VoiceName != "Ash" {
-		t.Errorf("VoiceName = %q, want Ash (join)", got.VoiceName)
+	if got.VoiceName != "Moss" {
+		t.Errorf("VoiceName = %q, want Moss (join)", got.VoiceName)
 	}
 	if params := got.Params(); params["max_new_tokens"] != float64(512) {
 		t.Errorf("Params() = %v, want max_new_tokens 512", params)

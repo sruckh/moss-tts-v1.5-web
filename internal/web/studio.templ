@@ -1,0 +1,381 @@
+package web
+
+import (
+	"math"
+	"strconv"
+	"strings"
+
+	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/voices"
+)
+
+// Studio is the primary view: the masthead, the compose card (script editor +
+// parameters), the voice library, the render queue and the playback spoken
+// line — the whole product on one page, per DESIGN.md and index.html.
+templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string) {
+	@AppShell("Studio · Timbre", "studio") {
+		<header class="pb-12">
+			@spectrum()
+			<h1 class="font-display text-[clamp(32px,5vw,44px)] font-extrabold leading-none tracking-[-0.04em]">
+				Say it in your <em class="not-italic text-olive">voice</em>.
+			</h1>
+			<p class="mt-3 max-w-[56ch] text-text-dim">
+				Paste a script, pick a voice, and render speech on the rack. The queue below
+				polls itself — nothing on this page waits on the GPU.
+			</p>
+		</header>
+		@Compose(vs, firstVoiceID(vs))
+		<section class="mt-12 border-t border-line pt-12" id="voices">
+			<p class="eyebrow">Voice library</p>
+			<h2 class="font-display text-[26px] font-semibold tracking-[-0.02em]">A voice is a card</h2>
+			<p class="mt-2 max-w-[62ch] text-text-dim">
+				Stock models ship commercial-safe. Upload a short, clean reference to clone a
+				voice — it is stored privately and delivered to the synthesizer inline.
+				The whole card is the target.
+			</p>
+			<div class="mt-5">
+				@uploadAffordance()
+			</div>
+			<div class="mt-4">
+				@VoiceGrid(vs, firstVoiceID(vs))
+			</div>
+		</section>
+		<section class="mt-12 border-t border-line pt-12" id="queue-sec">
+			<p class="eyebrow">Render queue</p>
+			<h2 class="font-display text-[26px] font-semibold tracking-[-0.02em]">What the GPU is doing</h2>
+			<p class="mt-2 max-w-[62ch] text-text-dim">
+				Serverless endpoints sleep. The queue is honest about that: warming is a state
+				of its own, not a disguised spinner, and every row shows what it cost.
+			</p>
+			<div class="mt-6">
+				@Queue(items, 0, durations)
+			</div>
+		</section>
+		@playbackSection(items, durations)
+		@studioHelpers()
+	}
+}
+
+// Compose is the render form: the script editor (the widest, quietest surface)
+// with its Olive character meter, then the parameters around it — Model, Seed,
+// Pace, Pitch, Expressiveness, and the Output toggles. It posts to /jobs and
+// swaps the returned queue fragment in place.
+templ Compose(available []voices.Voice, selectedID int64) {
+	<form
+		hx-post="/jobs"
+		hx-target="#queue"
+		hx-swap="outerHTML"
+		class="flex flex-col gap-6 rounded-container border border-line bg-surface-1 p-6"
+		x-data="{ script: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
+	>
+		<input type="hidden" id="voice_id" name="voice_id" value={ strconv.FormatInt(selectedID, 10) }/>
+		<div>
+			<label class="field-label" for="script">Script</label>
+			<textarea
+				id="script"
+				name="text"
+				rows="6"
+				required
+				x-model="script"
+				:style="over ? 'border-color: var(--color-burnt)' : ''"
+				placeholder="Paste the script to render…"
+				class="input script-input"
+			></textarea>
+			<div class="count">
+				<span x-text="chars.toLocaleString() + ' / ' + limit.toLocaleString() + ' characters'">0 / 5,000 characters</span>
+				<span x-text="'≈ ' + est + ' at current pace'">≈ 0:00 at current pace</span>
+			</div>
+			<div class="meter"><i :style="'width:' + Math.min(100, (chars / limit) * 100) + '%'"></i></div>
+			<p class="help help--limit" x-show="over" x-cloak>
+				Past the 5,000-character limit. Split the script into two takes and render them in sequence.
+			</p>
+		</div>
+		<div class="grid gap-6 sm:grid-cols-2">
+			<div>
+				<span class="field-label">Model</span>
+				<div class="input flex items-center" aria-readonly="true">MOSS-TTS v1.5</div>
+				<p class="help">The one model on this rack — the voice comes from the card you pick below. Endpoint idle: the first render adds a cold start.</p>
+			</div>
+			<div>
+				<label class="field-label" for="seed">Seed</label>
+				<input class="input" id="seed" name="seed" value="184203" inputmode="numeric"/>
+				<p class="help">Reuse a seed to reproduce a take exactly.</p>
+			</div>
+			<div>
+				<div class="range-head">
+					<label class="field-label" for="pace" style="margin:0">Pace</label>
+					<span class="range-val" x-text="(+pace).toFixed(2) + '×'">1.00×</span>
+				</div>
+				<input
+					class="range"
+					type="range"
+					id="pace"
+					name="pace"
+					min="0.5"
+					max="2"
+					step="0.05"
+					value="1"
+					x-model="pace"
+					x-init="rangeFill($el)"
+					@input="rangeFill($el)"
+				/>
+			</div>
+			<div>
+				<div class="range-head">
+					<label class="field-label" for="pitch" style="margin:0">Pitch</label>
+					<span class="range-val" x-text="(+pitch > 0 ? '+' : '') + pitch + ' st'">0 st</span>
+				</div>
+				<input
+					class="range"
+					type="range"
+					id="pitch"
+					name="pitch"
+					min="-12"
+					max="12"
+					step="1"
+					value="0"
+					x-model="pitch"
+					x-init="rangeFill($el)"
+					@input="rangeFill($el)"
+				/>
+			</div>
+			<div>
+				<div class="range-head">
+					<label class="field-label" for="expr" style="margin:0">Expressiveness</label>
+					<span class="range-val" x-text="(+expr).toFixed(2)">0.65</span>
+				</div>
+				<input
+					class="range"
+					type="range"
+					id="expr"
+					name="expressiveness"
+					min="0"
+					max="1"
+					step="0.01"
+					value="0.65"
+					x-model="expr"
+					x-init="rangeFill($el)"
+					@input="rangeFill($el)"
+				/>
+			</div>
+			<div>
+				<span class="field-label">Output</span>
+				<div class="flex flex-wrap gap-6 pt-1">
+					<label class="sw-toggle">
+						<input type="checkbox" name="output_48k" checked/>
+						<span class="track"><span class="knob"></span></span>
+						<span class="text-[13.5px]">48 kHz WAV</span>
+					</label>
+					<label class="sw-toggle">
+						<input type="checkbox" name="normalize"/>
+						<span class="track"><span class="knob"></span></span>
+						<span class="text-[13.5px]">Normalize</span>
+					</label>
+				</div>
+			</div>
+		</div>
+		<div class="flex flex-wrap items-center gap-3">
+			<button type="submit" class="btn">Render speech</button>
+			<button type="reset" class="btn btn--quiet">Reset controls</button>
+		</div>
+	</form>
+}
+
+// spectrum is the masthead's ambient level meter: the palette itself as ten
+// bars, breathing at 3.2s — animation two of the three the system allows, and
+// the one place pure Blue may appear.
+templ spectrum() {
+	<div class="spectrum" aria-hidden="true">
+		for i, b := range spectrumBars() {
+			<i class={ b.class } style={ "height: " + b.height + "%; animation-delay: " + strconv.FormatFloat(float64(i)*0.16, 'f', 2, 64) + "s" }></i>
+		}
+	</div>
+}
+
+type spectrumBar struct {
+	class  string
+	height string
+}
+
+// spectrumBars is the palette in palette order, at the living reference's
+// heights. Ink on Ink reads as a rest — the meter is decorative, not data.
+func spectrumBars() []spectrumBar {
+	return []spectrumBar{
+		{"bg-blue", "46"},
+		{"bg-purple", "62"},
+		{"bg-burnt", "80"},
+		{"bg-teal", "58"},
+		{"bg-olive", "100"},
+		{"bg-amber", "72"},
+		{"bg-green", "54"},
+		{"bg-paper", "88"},
+		{"bg-indigo", "66"},
+		{"bg-ink", "40"},
+	}
+}
+
+// latestReady returns the most recent ready job (items are newest-first),
+// which is the take the spoken line plays.
+func latestReady(items []jobs.Job) (jobs.Job, bool) {
+	for _, j := range items {
+		if j.Status == jobs.StatusReady {
+			return j, true
+		}
+	}
+	return jobs.Job{}, false
+}
+
+// scriptWords splits a take's text for the spoken line's word-level playhead.
+func scriptWords(text string) []string {
+	return strings.Fields(text)
+}
+
+// waveHeights returns n deterministic bar heights (px) for the spoken line's
+// waveform — the living reference's envelope, computed server-side so the
+// markup is stable.
+func waveHeights(n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		env := math.Sin((float64(i) / float64(n)) * math.Pi)
+		out[i] = 6 + (math.Abs(math.Sin(float64(i)*1.7))*0.6+math.Abs(math.Sin(float64(i)*0.43))*0.4)*42*(0.35+env*0.65)
+	}
+	return out
+}
+
+// playbackSection renders the signature component for the most recent ready
+// take, or an invitation when nothing has rendered yet.
+templ playbackSection(items []jobs.Job, durations map[int64]string) {
+	<section class="mt-12 border-t border-line pt-12" id="playback">
+		<p class="eyebrow">Playback</p>
+		<h2 class="font-display text-[26px] font-semibold tracking-[-0.02em]">The spoken line</h2>
+		<p class="mt-2 max-w-[62ch] text-text-dim">
+			Waveform and script are one instrument: the played portion turns Teal, the word
+			being spoken sits in Olive, and everything already said settles to dim Paper.
+		</p>
+		<div class="mt-6">
+			if j, ok := latestReady(items); ok {
+				@spokenLinePlayer(j, durations[j.ID])
+			} else {
+				<div class="empty">
+					<span class="badge badge--live"><span class="dot"></span> Nothing rendered yet</span>
+					<h4>Nothing to play yet</h4>
+					<p>Render a take and it lands here — waveform, words and all, ready to hear and download.</p>
+				</div>
+			}
+		</div>
+	</section>
+}
+
+// spokenLinePlayer is the signature component wired to the take's real audio:
+// an <audio> element drives the playhead through the waveform and the words.
+templ spokenLinePlayer(j jobs.Job, dur string) {
+	<div class="player" x-data="spokenLine()">
+		<div class="player-bar">
+			<button type="button" class="play" @click="toggle" :aria-label="playing ? 'Pause preview' : 'Play preview'">
+				<svg x-show="!playing" width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><path d="M3 2l10 5.5L3 13z"></path></svg>
+				<svg x-show="playing" x-cloak width="15" height="15" viewBox="0 0 15 15" fill="currentColor" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="10"></rect><rect x="8.5" y="2.5" width="3.5" height="10"></rect></svg>
+			</button>
+			<div class="wave" x-ref="wave" aria-hidden="true">
+				for _, h := range waveHeights(84) {
+					<i style={ "height: " + strconv.FormatFloat(h, 'f', 1, 64) + "px" }></i>
+				}
+			</div>
+			<span class="time" x-text="timeLabel">{ "0:00 / " + dur }</span>
+		</div>
+		<p class="script" x-ref="script">
+			for _, w := range scriptWords(j.Text) {
+				<span class="wd">{ w }</span>{ " " }
+			}
+		</p>
+		<div class="player-foot">
+			<div class="flex flex-wrap items-center gap-3">
+				<span class="badge badge--ready"><span class="dot"></span> Ready</span>
+				if j.VoiceKind == voices.KindCloned {
+					<span class="badge badge--cloned">Cloned voice</span>
+				}
+				<span class="font-mono text-[13px] tabular-nums text-text-faint">{ dur } · take { strconv.FormatInt(j.ID, 10) }</span>
+			</div>
+			<div class="flex flex-wrap items-center gap-2">
+				<a class="btn btn--quiet btn--sm" href={ templ.SafeURL("/jobs/" + strconv.FormatInt(j.ID, 10) + "/audio") } download>Download WAV</a>
+			</div>
+		</div>
+		<audio
+			x-ref="audio"
+			src={ "/jobs/" + strconv.FormatInt(j.ID, 10) + "/audio" }
+			preload="metadata"
+			class="hidden"
+			@timeupdate="paint"
+			@ended="finish"
+			@loadedmetadata="paint"
+			@pause="playing = false; paint()"
+		></audio>
+	</div>
+}
+
+// studioHelpers is the small client-side script the studio and queue pages
+// share: slider fill binding, model↔card selection sync, and the spoken line's
+// Alpine component factory. Defined once per page, before Alpine boots.
+templ studioHelpers() {
+	<script>
+		function rangeFill(el) {
+			var pct = (el.value - el.min) / (el.max - el.min) * 100;
+			el.style.setProperty('--fill', pct + '%');
+		}
+		// Click a voice card to select it: flip aria-pressed (the CSS restyles)
+		// and sync the compose form's hidden voice. Delegated to document so it
+		// survives the grid swap after an upload.
+		document.addEventListener('click', function (e) {
+			var btn = e.target.closest('.voice-card');
+			if (!btn) { return; }
+			var grid = btn.closest('#voice-grid');
+			if (!grid) { return; }
+			grid.querySelectorAll('.voice-card').forEach(function (b) {
+				b.setAttribute('aria-pressed', 'false');
+			});
+			btn.setAttribute('aria-pressed', 'true');
+			var vid = document.getElementById('voice_id');
+			if (vid && btn.dataset.voiceId) { vid.value = btn.dataset.voiceId; }
+		});
+		// The spoken line: an Alpine component painting the playhead through
+		// waveform bars (Teal past / Olive now) and words (settled dim, current
+		// Ink-on-Olive) from the audio element's clock.
+		window.spokenLine = function () {
+			return {
+				playing: false,
+				timeLabel: '',
+				fmt: function (s) {
+					if (!isFinite(s) || s <= 0) { return '0:00'; }
+					var m = Math.floor(s / 60);
+					return m + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+				},
+				init: function () { this.paint(); },
+				toggle: function () {
+					var a = this.$refs.audio;
+					if (!a) { return; }
+					if (this.playing) { a.pause(); this.playing = false; this.paint(); return; }
+					var self = this;
+					a.play().then(function () { self.playing = true; self.paint(); }, function () {});
+				},
+				finish: function () { this.playing = false; this.paint(); },
+				paint: function () {
+					var a = this.$refs.audio;
+					if (!a) { return; }
+					var d = a.duration || 0;
+					var t = a.currentTime || 0;
+					var p = d > 0 ? t / d : 0;
+					var bars = this.$refs.wave.children;
+					var edge = Math.floor(p * bars.length);
+					for (var i = 0; i < bars.length; i++) {
+						bars[i].className = i < edge ? 'past' : (i === edge && this.playing ? 'now' : '');
+					}
+					var words = this.$refs.script.querySelectorAll('.wd');
+					var wi = Math.floor(p * words.length);
+					for (var j = 0; j < words.length; j++) {
+						words[j].className = j < wi ? 'wd said' : (j === wi && this.playing ? 'wd now' : 'wd');
+					}
+					this.timeLabel = this.fmt(t) + ' / ' + this.fmt(d);
+				}
+			};
+		};
+	</script>
+}

@@ -8,16 +8,19 @@ templ Login(errMsg string) {
 	@Layout("Sign in · Timbre") {
 		<main class="flex min-h-screen items-center justify-center p-6">
 			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
-				<h1 class="font-display text-3xl font-extrabold text-paper">Timbre</h1>
-				<p class="mt-1 text-sm text-text-dim">Sign in to continue.</p>
+				<div class="mb-4 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				<p class="text-sm text-text-dim">Sign in to continue.</p>
 				if errMsg != "" {
-					<p role="alert" class="mt-4 rounded-control border border-burnt px-3 py-2 text-sm text-burnt">
-						{ errMsg }
-					</p>
+					<div class="alert alert--limit mt-4" role="alert">
+						<div><b>Sign-in failed</b><p>{ errMsg }</p></div>
+					</div>
 				}
-				<form method="post" action="/login" class="mt-6 space-y-4">
+				<form method="post" action="/login" class="mt-6 flex flex-col gap-4">
 					<div>
-						<label for="username" class="block text-sm text-text-dim">Username</label>
+						<label for="username" class="field-label">Username</label>
 						<input
 							id="username"
 							name="username"
@@ -25,24 +28,21 @@ templ Login(errMsg string) {
 							required
 							autofocus
 							autocomplete="username"
-							class="mt-1 w-full rounded-control border border-line bg-surface-2 px-3 py-2 text-paper"
+							class="input"
 						/>
 					</div>
 					<div>
-						<label for="password" class="block text-sm text-text-dim">Password</label>
+						<label for="password" class="field-label">Password</label>
 						<input
 							id="password"
 							name="password"
 							type="password"
 							required
 							autocomplete="current-password"
-							class="mt-1 w-full rounded-control border border-line bg-surface-2 px-3 py-2 text-paper"
+							class="input"
 						/>
 					</div>
-					<button
-						type="submit"
-						class="w-full rounded-control bg-indigo px-3 py-2 font-medium text-paper"
-					>
+					<button type="submit" class="btn w-full justify-center">
 						Sign in
 					</button>
 				</form>

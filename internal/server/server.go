@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
@@ -76,7 +75,7 @@ func (s *Server) routes() {
 	s.router.Post("/jobs", s.handleCreateJob)
 	s.router.Get("/jobs/{id}/audio", s.handleDownloadAudio)
 	s.router.Delete("/jobs/{id}", s.handleDeleteJob)
-	s.router.Get("/", templ.Handler(web.Shell()).ServeHTTP)
+	s.router.Get("/", s.handleStudio)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -1,10 +1,8 @@
 package web
 
-// Layout is the document shell every page renders inside: fonts, the compiled
-// Tailwind stylesheet, HTMX and Alpine. Page content goes in as children.
-//
-// Deliberately bare — the real chrome (masthead spectrum, voice library, queue)
-// is built in the UI goal against DESIGN.md and index.html.
+// Layout is the document shell every page renders inside: the three typefaces
+// from the living reference, the compiled Tailwind stylesheet, HTMX v4 and
+// Alpine. Page content goes in as children.
 templ Layout(title string) {
 	<!DOCTYPE html>
 	<html lang="en">
@@ -16,10 +14,14 @@ templ Layout(title string) {
 			<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 			<link
 				rel="stylesheet"
-				href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap"
+				href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
 			/>
 			<link rel="stylesheet" href="/static/app.css"/>
-			<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+			<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"/>
+			<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png"/>
+			<link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png"/>
+			<link rel="manifest" href="/static/site.webmanifest"/>
+			<script type="module" src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0-beta4/dist/htmx.esm.min.js" crossorigin="anonymous"></script>
 			<script src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js" defer></script>
 		</head>
 		<body class="bg-ink text-paper font-body antialiased">
@@ -28,13 +30,40 @@ templ Layout(title string) {
 	</html>
 }
 
-// Shell is the placeholder landing page: proof the template pipeline compiles
-// and the stylesheet is wired. Replaced by the real UI in a later goal.
-templ Shell() {
-	@Layout("Timbre") {
-		<main class="mx-auto max-w-2xl p-12">
-			<h1 class="font-display text-4xl font-extrabold text-paper">Timbre</h1>
-			<p class="mt-4 text-text-dim">Text to speech. Scaffold up.</p>
-		</main>
+// AppShell is the gated app's chrome: a rail with the Timbre mark and section
+// nav, and the page content in main. active names the current section
+// ("studio", "voices", "queue") so its nav link gets the Olive marker.
+templ AppShell(title, active string) {
+	@Layout(title) {
+		<div class="mx-auto grid max-w-[1180px] grid-cols-1 gap-0 px-6 lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-12">
+			<aside class="static h-auto self-start overflow-y-auto py-8 lg:sticky lg:top-0 lg:h-screen">
+				<div class="mb-6 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				<nav class="flex flex-row flex-wrap gap-1 lg:flex-col lg:gap-[2px] lg:border-l lg:border-line">
+					@navLink("/", "Studio", active == "studio")
+					@navLink("/voices", "Voices", active == "voices")
+					@navLink("/queue", "Queue", active == "queue")
+				</nav>
+				<form method="post" action="/logout" class="mt-8">
+					<button type="submit" class="btn btn--quiet btn--sm">Sign out</button>
+				</form>
+			</aside>
+			<main class="min-w-0 py-8 lg:py-12">
+				{ children... }
+			</main>
+		</div>
 	}
+}
+
+// navLink is one rail entry: mono uppercase, the active one marked in Olive
+// with an Olive leading border — the keyboard user's "you are here".
+templ navLink(href, label string, on bool) {
+	<a
+		href={ templ.SafeURL(href) }
+		class={ "px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.04em] no-underline transition-colors lg:-ml-px lg:border-l",
+			templ.KV("text-olive lg:border-olive", on),
+			templ.KV("text-text-faint hover:text-paper lg:border-transparent", !on) }
+	>{ label }</a>
 }
