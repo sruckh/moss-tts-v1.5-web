@@ -92,6 +92,13 @@ reference, rendered in itself.
   poll sends the selected take back (`hx-vals` → `?take=`), so the server
   re-renders the highlight on every tick. Putting the player inside `#queue`
   would restart playback every two seconds.
+  **The queue's vertical scroll container lives outside the swapped fragment.**
+  The `.scrollable-list max-h-[500px]` wrapper is static markup in the page
+  templates (`Studio`, `QueuePage`), never inside `Queue`: `#queue` is replaced
+  by `hx-swap="outerHTML"` on every 2s tick, so any element inside it that holds
+  a scroll offset is recreated and the scroll snaps back to the top. Do not fix
+  this with `hx-on` scroll-preservation handlers — under HTMX v4 the after-swap
+  handler's `this` is the detached pre-swap element, so they silently no-op.
   **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
   backfilled by `db.Migrate` for older rows). The player's model badge reads that
   column — never a literal in a template. The frontend is templ + HTMX v4 (ESM from

@@ -116,15 +116,16 @@ func queuePollURL(selected int64) string {
 // URL (`/jobs?take=N`), so each swap re-renders the highlight and the next poll
 // asks for it again — the selection sustains itself with no client state in the
 // loop. The player itself lives outside this fragment and is never swapped by
-// the poll — otherwise playback would restart on the tick.
+// the poll — otherwise playback would restart on the tick. The vertical scroll
+// container (`scrollable-list max-h-[500px]`) lives outside too, in the page
+// templates that embed Queue: the element holding the scroll offset must never
+// be inside the swapped fragment, or every 2s tick snaps it back to the top.
 templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, selected int64) {
 	<div
 		id="queue"
 		hx-get={ queuePollURL(selected) }
 		hx-trigger="every 2s"
-		hx-swap="outerHTML show:none"
-		hx-on::before-swap="const el = this.querySelector('.scrollable-list'); window._queueScrollTop = el ? el.scrollTop : 0;"
-		hx-on::after-swap="const el = this.querySelector('.scrollable-list'); if (el &amp;&amp; window._queueScrollTop !== undefined) el.scrollTop = window._queueScrollTop;"
+		hx-swap="outerHTML"
 		data-take={ strconv.FormatInt(selected, 10) }
 		class="flex flex-col gap-3"
 	>
@@ -143,7 +144,7 @@ templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, sele
 				<p>Write a script, pick a voice, and render your first take — it lands here.</p>
 			</div>
 		} else {
-			<div class="rounded-container border border-line bg-surface-1 p-4 scrollable-list max-h-[500px]">
+			<div class="rounded-container border border-line bg-surface-1 p-4">
 				<table class="queue-table w-full table-fixed" role="grid">
 					<thead>
 						<tr>
@@ -271,7 +272,9 @@ templ QueuePage(items []jobs.Job, available []voices.Voice, durations map[int64]
 		</header>
 		@Compose(available, firstVoiceID(available))
 		<section class="mt-8">
-			@Queue(items, 0, durations, take)
+			<div class="scrollable-list max-h-[500px]">
+				@Queue(items, 0, durations, take)
+			</div>
 		</section>
 		@playbackSection(items, durations, take)
 		@studioHelpers(take)

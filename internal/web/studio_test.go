@@ -248,22 +248,38 @@ func TestPlayerWordTimings(t *testing.T) {
 	}
 }
 
-// The Queue container must be scrollable with max-height corresponding to 10 items,
-// and preserve scroll position across 2s HTMX updates.
-func TestQueueContainerIsScrollableWithMaxHeight(t *testing.T) {
-	html := render(t, Queue(sampleJobs(), 0, nil, 0))
+// The queue's vertical scroll container must live OUTSIDE the swapped #queue
+// fragment: the 2s poll replaces #queue with hx-swap="outerHTML", so any
+// element inside it that holds a scroll offset is recreated on every tick and
+// the scroll snaps back to the top. The fragment therefore carries no
+// scrollable-list of its own; the pages embedding Queue provide a static
+// wrapper that HTMX never touches.
+func TestQueueScrollContainerIsOutsideSwappedFragment(t *testing.T) {
+	fragment := render(t, Queue(sampleJobs(), 0, nil, 0))
 
-	if !strings.Contains(html, "scrollable-list") {
-		t.Error("queue container missing class 'scrollable-list'")
+	for _, banned := range []string{"scrollable-list", "max-h-[500px]", "hx-on"} {
+		if strings.Contains(fragment, banned) {
+			t.Errorf("queue fragment contains %q — scroll/JS state inside the swapped fragment is reset by every poll", banned)
+		}
 	}
-	if !strings.Contains(html, "max-h-[500px]") {
-		t.Error("queue container missing max height constraint 'max-h-[500px]'")
+	if !strings.Contains(fragment, `hx-swap="outerHTML"`) {
+		t.Error("queue fragment no longer swaps outerHTML — poll contract changed?")
 	}
-	if !strings.Contains(html, `hx-swap="outerHTML show:none"`) {
-		t.Error("queue fragment missing 'show:none' swap modifier to prevent auto-scrolling")
-	}
-	if !strings.Contains(html, `hx-on::before-swap=`) || !strings.Contains(html, `hx-on::after-swap=`) {
-		t.Error("queue fragment missing scroll preservation handlers for HTMX swaps")
+
+	for name, page := range map[string]templ.Component{
+		"Studio":    Studio(sampleJobs(), sampleVoices(), nil, 0),
+		"QueuePage": QueuePage(sampleJobs(), sampleVoices(), nil, 0),
+	} {
+		html := render(t, page)
+		wrap := strings.Index(html, "scrollable-list max-h-[500px]")
+		queue := strings.Index(html, `id="queue"`)
+		if wrap < 0 {
+			t.Errorf("%s is missing the static 'scrollable-list max-h-[500px]' queue wrapper", name)
+			continue
+		}
+		if queue < 0 || wrap > queue {
+			t.Errorf("%s must open the scroll wrapper before #queue (it has to be an ancestor HTMX never swaps)", name)
+		}
 	}
 }
 

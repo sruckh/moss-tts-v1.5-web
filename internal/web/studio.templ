@@ -50,7 +50,7 @@ templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string, se
 				of its own, not a disguised spinner, and every row shows what it cost.
 				Pick a row to hear it.
 			</p>
-			<div class="mt-6">
+			<div class="mt-6 scrollable-list max-h-[500px]">
 				@Queue(items, 0, durations, take)
 			</div>
 		</section>
