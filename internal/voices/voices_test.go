@@ -52,7 +52,7 @@ func TestSeedStockIdempotent(t *testing.T) {
 		t.Fatalf("after second seed = %d, want %d (duplicated)", got, want)
 	}
 
-	items, err := store.List(ctx)
+	items, err := store.List(ctx, 0)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -81,8 +81,14 @@ func TestCreateClonedRoundTrip(t *testing.T) {
 		t.Fatalf("SeedStock: %v", err)
 	}
 
+	res, err := store.db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES ('creator', 'hash')")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	userID, _ := res.LastInsertId()
+
 	want := minimalWAV()
-	id, err := store.CreateCloned(ctx, "My Clone", ".wav", want)
+	id, err := store.CreateCloned(ctx, userID, "My Clone", ".wav", want)
 	if err != nil {
 		t.Fatalf("CreateCloned: %v", err)
 	}
@@ -125,7 +131,7 @@ func TestCreateClonedRoundTrip(t *testing.T) {
 	}
 
 	// Cloned voice appears in the list after the stock set.
-	items, err := store.List(ctx)
+	items, err := store.List(ctx, userID)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -135,6 +141,122 @@ func TestCreateClonedRoundTrip(t *testing.T) {
 	last := items[len(items)-1]
 	if last.ID != id || last.Kind != KindCloned || last.Name != "My Clone" {
 		t.Errorf("cloned voice = %+v", last)
+	}
+}
+
+func TestVoiceOwnershipAndVisibility(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := store.SeedStock(ctx); err != nil {
+		t.Fatalf("SeedStock: %v", err)
+	}
+	newUser := func(username string) int64 {
+		t.Helper()
+		res, err := store.db.ExecContext(ctx,
+			"INSERT INTO users (username, password_hash) VALUES (?, 'hash')", username)
+		if err != nil {
+			t.Fatalf("insert %s: %v", username, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatalf("%s id: %v", username, err)
+		}
+		return id
+	}
+	userA := newUser("user_a")
+	userB := newUser("user_b")
+
+	voiceID, err := store.CreateCloned(ctx, userA, "Voice A", ".wav", minimalWAV())
+	if err != nil {
+		t.Fatalf("CreateCloned: %v", err)
+	}
+
+	var creatorAssignments int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM voice_assignments WHERE voice_id = ? AND user_id = ?`,
+		voiceID, userA).Scan(&creatorAssignments); err != nil {
+		t.Fatalf("creator assignment: %v", err)
+	}
+	if creatorAssignments != 1 {
+		t.Fatalf("creator assignments = %d, want 1", creatorAssignments)
+	}
+
+	accessible, err := store.IsAccessibleToUser(ctx, voiceID, userB)
+	if err != nil {
+		t.Fatalf("IsAccessibleToUser before assign: %v", err)
+	}
+	if accessible {
+		t.Fatal("unassigned user can access private voice")
+	}
+
+	if err := store.Assign(ctx, voiceID, userB); err != nil {
+		t.Fatalf("Assign first: %v", err)
+	}
+	if err := store.Assign(ctx, voiceID, userB); err != nil {
+		t.Fatalf("Assign second: %v", err)
+	}
+	var assignmentCount int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM voice_assignments WHERE voice_id = ? AND user_id = ?`,
+		voiceID, userB).Scan(&assignmentCount); err != nil {
+		t.Fatalf("assignment count: %v", err)
+	}
+	if assignmentCount != 1 {
+		t.Fatalf("idempotent Assign rows = %d, want 1", assignmentCount)
+	}
+
+	countVoice := func(items []Voice) int {
+		count := 0
+		for _, item := range items {
+			if item.ID == voiceID {
+				count++
+			}
+		}
+		return count
+	}
+	listB, err := store.List(ctx, userB)
+	if err != nil {
+		t.Fatalf("List assigned user: %v", err)
+	}
+	if got := countVoice(listB); got != 1 {
+		t.Fatalf("assigned voice occurrences = %d, want 1", got)
+	}
+
+	if err := store.SetGlobal(ctx, voiceID, true); err != nil {
+		t.Fatalf("SetGlobal true: %v", err)
+	}
+	listB, err = store.List(ctx, userB)
+	if err != nil {
+		t.Fatalf("List global assigned voice: %v", err)
+	}
+	if got := countVoice(listB); got != 1 {
+		t.Fatalf("global assigned voice occurrences = %d, want 1", got)
+	}
+
+	if err := store.SetGlobal(ctx, voiceID, false); err != nil {
+		t.Fatalf("SetGlobal false: %v", err)
+	}
+	if err := store.Unassign(ctx, voiceID, userB); err != nil {
+		t.Fatalf("Unassign: %v", err)
+	}
+	if err := store.Unassign(ctx, voiceID, userB); err != nil {
+		t.Fatalf("idempotent Unassign: %v", err)
+	}
+	accessible, err = store.IsAccessibleToUser(ctx, voiceID, userB)
+	if err != nil {
+		t.Fatalf("IsAccessibleToUser after unassign: %v", err)
+	}
+	if accessible {
+		t.Fatal("unassigned user still has access")
+	}
+	listB, err = store.List(ctx, userB)
+	if err != nil {
+		t.Fatalf("List after unassign: %v", err)
+	}
+	if got := countVoice(listB); got != 0 {
+		t.Fatalf("unassigned voice occurrences = %d, want 0", got)
 	}
 }
 

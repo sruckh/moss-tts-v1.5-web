@@ -46,7 +46,8 @@ var allowedExt = map[string]bool{
 // (used by the verification checks and any API client) gets the row list; a
 // browser gets the rendered voice-library page.
 func (s *Server) handleVoiceLibrary(w http.ResponseWriter, r *http.Request) {
-	items, err := s.voices.List(r.Context())
+	userID, _ := s.auth.UserID(r)
+	items, err := s.voices.List(r.Context(), userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
@@ -59,7 +60,7 @@ func (s *Server) handleVoiceLibrary(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(items)
 		return
 	}
-	_ = web.VoiceLibrary(items).Render(r.Context(), w)
+	_ = web.VoiceLibrary(items).Render(s.navContext(r), w)
 }
 
 // handleVoiceUpload answers POST /voices/upload (multipart). It validates type
@@ -118,13 +119,14 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 		name = deriveVoiceName(header.Filename)
 	}
 
-	id, err := s.voices.CreateCloned(r.Context(), name, ext, data)
+	userID, _ := s.auth.UserID(r)
+	id, err := s.voices.CreateCloned(r.Context(), userID, name, ext, data)
 	if err != nil {
 		serverError(w, r, err)
 		return
 	}
 
-	items, err := s.voices.List(r.Context())
+	items, err := s.voices.List(r.Context(), userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
@@ -162,7 +164,8 @@ func (s *Server) handleVoiceRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.voices.List(r.Context())
+	userID, _ := s.auth.UserID(r)
+	items, err := s.voices.List(r.Context(), userID)
 	if err != nil {
 		serverError(w, r, err)
 		return

@@ -55,7 +55,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	stockID := firstStockID(t, handle)
 
-	cloneID, err := voiceStore.CreateCloned(context.Background(), "Clone", ".mp3", []byte("ABC"))
+	cloneID, err := voiceStore.CreateCloned(context.Background(), userID, "Clone", ".mp3", []byte("ABC"))
 	if err != nil {
 		t.Fatalf("CreateCloned: %v", err)
 	}
@@ -97,7 +97,7 @@ func (h *harness) enqueue(t *testing.T, voiceID int64, text string) int64 {
 func (h *harness) get(t *testing.T, id int64) jobs.Job {
 	t.Helper()
 
-	job, err := h.jobs.Get(context.Background(), id)
+	job, err := h.jobs.Get(context.Background(), id, h.userID)
 	if err != nil {
 		t.Fatalf("Get job %d: %v", id, err)
 	}
@@ -396,7 +396,7 @@ func waitForStatus(t *testing.T, h *harness, id int64, want string) <-chan struc
 
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			job, err := h.jobs.Get(context.Background(), id)
+			job, err := h.jobs.Get(context.Background(), id, h.userID)
 			switch {
 			case err == nil && job.Status == want:
 				return

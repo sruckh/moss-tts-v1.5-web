@@ -169,7 +169,13 @@ func TestExemptList(t *testing.T) {
 	for path, want := range map[string]bool{
 		"/login":          true,
 		"/healthz":        true,
+		"/register":       true,
+		"/apply":          true,
+		"/apply/status":   true,
 		"/static/app.css": true,
+		// Exact entries, not a prefix: nothing else under /apply is public,
+		// and a prefix would silently exempt whatever is mounted there next.
+		"/apply/status/all": false,
 		// Reference audio is delivered base64-inline, never served over HTTP —
 		// no route is exempt for it.
 		"/refs/abc.wav": false,

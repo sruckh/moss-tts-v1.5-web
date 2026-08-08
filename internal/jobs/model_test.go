@@ -16,7 +16,7 @@ func TestEnqueueRecordsDefaultModel(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	job, err := store.Get(ctx, id)
+	job, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestEnqueueKeepsExplicitModel(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	job, err := store.Get(ctx, id)
+	job, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

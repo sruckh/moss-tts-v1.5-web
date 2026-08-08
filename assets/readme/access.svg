@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="880" viewBox="0 0 1200 880"
+     role="img" aria-labelledby="access-title access-desc">
+  <title id="access-title">Timbre access lifecycle — apply, an admin decides, the gate re-checks on every request</title>
+  <desc id="access-desc">Three bands. Applying: a visitor posts the public /apply form, which writes an access_requests row with status pending and creates no account; POST /register is the API twin and creates a pending account instead; neither route issues a session. Admin: the /admin/ surface manages users, access requests and voice cards, its nav badge counting the requests still waiting, and its actions are approve (creating an account), deny, and disable; the last approved admin cannot be disabled, demoted or deleted, and no admin can demote themselves. Every gated request: the session cookie passes through the approval gate, which reads role and status from the database rather than the cookie, so an approved user reaches the studio and a pending or disabled one gets the holding screen. Closing notes: a voice card is visible when it is global or assigned to you, clones start out private, and jobs and WAV downloads are scoped to the session user, so another user's job id answers 404.</desc>
+
+  <rect width="1200" height="880" rx="26" fill="#00003E"/>
+
+  <!-- ================= Band 1 — applying ================= -->
+  <text x="64" y="86"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">APPLYING — PUBLIC ROUTES, NO SESSION ISSUED</text>
+
+  <g id="band-apply">
+    <rect x="64" y="116" width="180" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="154" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Visitor</text>
+    <text x="154" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">no account</text>
+
+    <path d="M252 158 H292" stroke="#59598F" stroke-width="2"/>
+    <path d="M292 158 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="300" y="116" width="300" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="450" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">/apply</text>
+    <text x="450" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">the application form</text>
+
+    <path d="M608 158 H648" stroke="#59598F" stroke-width="2"/>
+    <path d="M648 158 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="656" y="116" width="480" height="84" rx="14" fill="#202059" stroke="#C98500" stroke-width="2"/>
+    <text x="896" y="152" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">access_requests row</text>
+    <text x="896" y="180" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#C98500">status = pending — still no account</text>
+
+    <rect x="64" y="224" width="4" height="44" rx="2" fill="#006795"/>
+    <text x="92" y="254"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#8B8BB4">POST /register is the API twin: a pending account. Neither route issues a session.</text>
+  </g>
+
+  <!-- ================= Band 2 — the admin decides ================= -->
+  <text x="64" y="336"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">ADMIN — /admin/, ROLE READ LIVE ON EVERY REQUEST</text>
+
+  <g id="band-admin">
+    <rect x="64" y="366" width="356" height="88" rx="14" fill="#202059" stroke="#4A4AC8" stroke-width="2"/>
+    <text x="242" y="404" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Admin (3)</text>
+    <text x="242" y="432" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#9EB600">the badge counts what waits</text>
+
+    <path d="M428 410 H468" stroke="#59598F" stroke-width="2"/>
+    <path d="M468 410 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="476" y="366" width="210" height="88" rx="14" fill="#202059" stroke="#009044" stroke-width="2"/>
+    <text x="581" y="404" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Approve</text>
+    <text x="581" y="432" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">→ an account</text>
+
+    <rect x="702" y="366" width="200" height="88" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="802" y="404" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Deny</text>
+    <text x="802" y="432" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">→ decided</text>
+
+    <rect x="918" y="366" width="218" height="88" rx="14" fill="#202059" stroke="#C95D00" stroke-width="2"/>
+    <text x="1027" y="404" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Disable</text>
+    <text x="1027" y="432" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">→ no studio</text>
+
+    <rect x="64" y="478" width="4" height="76" rx="2" fill="#9EB600"/>
+    <text x="92" y="506"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#8B8BB4">The last approved admin cannot be disabled, demoted or deleted,</text>
+    <text x="92" y="538"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#8B8BB4">and no admin can demote themselves.</text>
+  </g>
+
+  <!-- ================= Band 3 — the gate, on every request ================= -->
+  <text x="64" y="594"
+        font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" letter-spacing="2.4" fill="#8B8BB4">EVERY GATED REQUEST — STATUS READ LIVE, NOT FROM THE COOKIE</text>
+
+  <g id="band-gate">
+    <rect x="64" y="624" width="200" height="84" rx="14" fill="#202059" stroke="#35356C"/>
+    <text x="164" y="660" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">Session</text>
+    <text x="164" y="688" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">signed cookie</text>
+
+    <path d="M272 666 H312" stroke="#59598F" stroke-width="2"/>
+    <path d="M312 666 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="320" y="624" width="280" height="84" rx="14" fill="#202059" stroke="#4A4AC8" stroke-width="2"/>
+    <text x="460" y="660" text-anchor="middle"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="24" fill="#D5D5F4">approvalGate</text>
+    <text x="460" y="688" text-anchor="middle"
+          font-family="IBM Plex Mono, ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" fill="#8B8BB4">SELECT role, status</text>
+
+    <!-- fork: approved above, everyone else below -->
+    <path d="M608 666 H640 M640 642 V724" stroke="#59598F" stroke-width="2" fill="none"/>
+    <path d="M640 642 H668" stroke="#59598F" stroke-width="2"/>
+    <path d="M668 642 l-11 -6 v12 z" fill="#59598F"/>
+    <path d="M640 724 H668" stroke="#59598F" stroke-width="2"/>
+    <path d="M668 724 l-11 -6 v12 z" fill="#59598F"/>
+
+    <rect x="676" y="610" width="460" height="64" rx="14" fill="#202059" stroke="#9EB600" stroke-width="2"/>
+    <text x="704" y="650"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#D5D5F4">Approved — the studio</text>
+
+    <rect x="676" y="692" width="460" height="64" rx="14" fill="#202059" stroke="#C95D00" stroke-width="2"/>
+    <text x="704" y="732"
+          font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+          font-size="22" fill="#D5D5F4">Pending or disabled — holding screen</text>
+  </g>
+
+  <!-- ================= Closing notes ================= -->
+  <rect x="64" y="780" width="4" height="76" rx="2" fill="#83008C"/>
+  <text x="92" y="808"
+        font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="22" fill="#8B8BB4">A voice card is visible when it is global or assigned to you; clones start private.</text>
+  <text x="92" y="840"
+        font-family="Instrument Sans, system-ui, -apple-system, Segoe UI, sans-serif"
+        font-size="22" fill="#8B8BB4">Jobs and downloads are scoped to the session user — another user's id is a 404.</text>
+</svg>

@@ -9,6 +9,7 @@ import (
 
 	"github.com/a-h/templ"
 
+	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/jobs"
 	"github.com/sruckh/timbre/internal/voices"
 )
@@ -90,18 +91,46 @@ func TestPaletteExhaustiveRenderedHTML(t *testing.T) {
 			Text: "Outro.", Error: "endpoint rejected the submission", ExecMS: 2400},
 	}
 	durations := map[int64]string{9: "0:06.02"}
+	admin := AdminData{
+		Users: []AdminUser{
+			{ID: 1, Username: "admin", Email: "admin@example.com", Role: auth.RoleAdmin, Status: auth.StatusApproved},
+			{ID: 2, Username: "reader", Role: auth.RoleUser, Status: auth.StatusDisabled},
+		},
+		Requests: []auth.AccessRequest{
+			{ID: 3, Username: "applicant", Email: "hello@example.com", Status: auth.RequestPending, CreatedAt: "2026-08-07"},
+		},
+		Voices: []AdminVoice{
+			{ID: 1, Kind: voices.KindStock, Name: "Moss", Model: "MOSS-TTS v1.5", IsGlobal: true},
+			{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", OwnerID: 2, OwnerName: "reader"},
+		},
+	}
 
 	pages := map[string]templ.Component{
-		"Studio":       Studio(items, vs, durations, 9),
-		"QueuePage":    QueuePage(items, vs, durations, 0),
-		"Queue":        Queue(items, 9, durations, 9),
-		"PlayerReady":  PlayerBody(items[0], durations[9]),
-		"PlayerBusy":   PlayerBody(items[1], ""),
-		"PlayerFailed": PlayerBody(items[3], ""),
-		"PlayerEmpty":  PlayerBody(jobs.Job{}, ""),
-		"VoiceLibrary": VoiceLibrary(vs),
-		"VoiceGrid":    VoiceGrid(vs, 4),
-		"Login":        Login("bad credentials"),
+		"Studio":          Studio(items, vs, durations, 9),
+		"QueuePage":       QueuePage(items, vs, durations, 0),
+		"Queue":           Queue(items, 9, durations, 9),
+		"PlayerReady":     PlayerBody(items[0], durations[9]),
+		"PlayerBusy":      PlayerBody(items[1], ""),
+		"PlayerFailed":    PlayerBody(items[3], ""),
+		"PlayerEmpty":     PlayerBody(jobs.Job{}, ""),
+		"VoiceLibrary":    VoiceLibrary(vs),
+		"VoiceGrid":       VoiceGrid(vs, 4),
+		"Admin":           AdminPage(admin),
+		"Login":           Login("bad credentials"),
+		"HoldingPending":  Holding(false),
+		"HoldingDisabled": Holding(true),
+
+		"Apply":          Apply(ApplyForm{}, ""),
+		"ApplyRejected":  Apply(ApplyForm{Username: "applicant", Email: "hello@example.com"}, "that username is taken"),
+		"ApplySubmitted": ApplySubmitted("applicant"),
+
+		// Each lookup state paints a different alert variant, so all four are
+		// rendered alongside the not-yet-searched page.
+		"ApplyStatusBlank":    ApplyStatus("", ""),
+		"ApplyStatusPending":  ApplyStatus("applicant", auth.RequestPending),
+		"ApplyStatusApproved": ApplyStatus("applicant", auth.RequestApproved),
+		"ApplyStatusDenied":   ApplyStatus("applicant", auth.RequestDenied),
+		"ApplyStatusNone":     ApplyStatus("stranger", ApplyStateNone),
 	}
 	for name, page := range pages {
 		var sb strings.Builder
@@ -111,5 +140,16 @@ func TestPaletteExhaustiveRenderedHTML(t *testing.T) {
 		if bad := foreignHexes(sb.String()); len(bad) > 0 {
 			t.Errorf("%s HTML contains colors outside the 10 palette hexes: %v", name, bad)
 		}
+	}
+
+	// The Admin nav link and its pending badge only render for an administrator
+	// with requests waiting, so they need a nav context to appear at all.
+	var badged strings.Builder
+	navCtx := WithNav(context.Background(), NavState{IsAdmin: true, PendingRequests: 3})
+	if err := AdminPage(admin).Render(navCtx, &badged); err != nil {
+		t.Fatalf("render Admin with the nav badge: %v", err)
+	}
+	if bad := foreignHexes(badged.String()); len(bad) > 0 {
+		t.Errorf("Admin nav badge HTML contains colors outside the 10 palette hexes: %v", bad)
 	}
 }

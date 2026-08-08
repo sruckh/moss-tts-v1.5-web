@@ -12,7 +12,7 @@ func TestRenameCloned(t *testing.T) {
 	defer closeDB()
 	ctx := context.Background()
 
-	id, err := store.CreateCloned(ctx, "take-01-final.wav", ".wav", []byte("reference"))
+	id, err := store.CreateCloned(ctx, 0, "take-01-final.wav", ".wav", []byte("reference"))
 	if err != nil {
 		t.Fatalf("CreateCloned: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestRenameValidation(t *testing.T) {
 	defer closeDB()
 	ctx := context.Background()
 
-	id, err := store.CreateCloned(ctx, "clip.wav", ".wav", []byte("reference"))
+	id, err := store.CreateCloned(ctx, 0, "clip.wav", ".wav", []byte("reference"))
 	if err != nil {
 		t.Fatalf("CreateCloned: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestRenameRefusesStock(t *testing.T) {
 	if err := store.SeedStock(ctx); err != nil {
 		t.Fatalf("SeedStock: %v", err)
 	}
-	items, err := store.List(ctx)
+	items, err := store.List(ctx, 0)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

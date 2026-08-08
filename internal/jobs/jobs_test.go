@@ -62,7 +62,7 @@ func TestEnqueueInsertsQueuedRow(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestMarkSubmittedIsCompareAndSet(t *testing.T) {
 		t.Error("second MarkSubmitted claimed an already-submitted row")
 	}
 
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestMarkFailedAndNoteAttempt(t *testing.T) {
 	if err := store.NoteAttempt(ctx, id, "connection refused"); err != nil {
 		t.Fatalf("NoteAttempt: %v", err)
 	}
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestMarkFailedAndNoteAttempt(t *testing.T) {
 	if err := store.MarkFailed(ctx, id, "runpod: HTTP 401"); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
-	got, err = store.Get(ctx, id)
+	got, err = store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestMarkFailedLeavesSubmittedJobAlone(t *testing.T) {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -301,9 +301,28 @@ func TestListForUserIsScopedAndNewestFirst(t *testing.T) {
 }
 
 func TestGetUnknownJob(t *testing.T) {
-	store, _, _ := newTestStore(t)
-	if _, err := store.Get(context.Background(), 4242); !errors.Is(err, ErrNotFound) {
+	store, userID, _ := newTestStore(t)
+	if _, err := store.Get(context.Background(), 4242, userID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetIsScopedToUser(t *testing.T) {
+	store, userID, voiceID := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Enqueue(ctx, NewJob{UserID: userID, VoiceID: voiceID, Text: "private render"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	if _, err := store.Get(ctx, id, userID+1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-user Get err = %v, want ErrNotFound", err)
+	}
+	if got, err := store.Get(ctx, id, userID); err != nil {
+		t.Fatalf("owner Get: %v", err)
+	} else if got.ID != id {
+		t.Fatalf("owner Get ID = %d, want %d", got.ID, id)
 	}
 }
 
@@ -330,7 +349,6 @@ func TestParamsToleratesGarbage(t *testing.T) {
 		t.Errorf("Params() = %v, want nil for empty JSON", got)
 	}
 }
-
 
 func TestPollerAndDeleteStoreOperations(t *testing.T) {
 	store, userID, voiceID := newTestStore(t)
@@ -360,7 +378,7 @@ func TestPollerAndDeleteStoreOperations(t *testing.T) {
 	if err := store.UpdateStatus(ctx, id, StatusInProgress); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -373,7 +391,7 @@ func TestPollerAndDeleteStoreOperations(t *testing.T) {
 	if err := store.MarkReady(ctx, id, "/data/audio/renders/job_1.wav", "wav", 24000, 100, 500, alignment); err != nil {
 		t.Fatalf("MarkReady: %v", err)
 	}
-	got, err = store.Get(ctx, id)
+	got, err = store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -400,7 +418,7 @@ func TestPollerAndDeleteStoreOperations(t *testing.T) {
 	}
 
 	// 7. Get after Delete returns ErrNotFound
-	if _, err := store.Get(ctx, id); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Get(ctx, id, userID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get after Delete err = %v, want ErrNotFound", err)
 	}
 }
@@ -420,7 +438,7 @@ func TestMarkPollerFailed(t *testing.T) {
 		t.Fatalf("MarkPollerFailed: %v", err)
 	}
 
-	got, err := store.Get(ctx, id)
+	got, err := store.Get(ctx, id, userID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

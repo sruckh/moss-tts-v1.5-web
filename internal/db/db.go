@@ -59,7 +59,12 @@ CREATE TABLE IF NOT EXISTS users (
 	id            INTEGER PRIMARY KEY AUTOINCREMENT,
 	username      TEXT    NOT NULL UNIQUE,
 	password_hash TEXT    NOT NULL,
-	created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+	created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+	role          TEXT    NOT NULL DEFAULT 'user'
+	              CHECK (role IN ('admin','user')),
+	status        TEXT    NOT NULL DEFAULT 'pending'
+	              CHECK (status IN ('approved','pending','disabled')),
+	email         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS voices (
@@ -69,7 +74,15 @@ CREATE TABLE IF NOT EXISTS voices (
 	model          TEXT,
 	license_label  TEXT,
 	reference_path TEXT,
-	created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+	created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+	owner_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	is_global      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS voice_assignments (
+	voice_id INTEGER NOT NULL REFERENCES voices(id) ON DELETE CASCADE,
+	user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	UNIQUE (voice_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -95,9 +108,22 @@ CREATE TABLE IF NOT EXISTS jobs (
 	updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS access_requests (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	username      TEXT    NOT NULL,
+	email         TEXT,
+	password_hash TEXT    NOT NULL,
+	status        TEXT    NOT NULL DEFAULT 'pending'
+	              CHECK (status IN ('pending','approved','denied')),
+	decided_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+	decided_at    TEXT
+);
+
 CREATE INDEX IF NOT EXISTS jobs_status_created_idx ON jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS jobs_user_created_idx   ON jobs (user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_runpod_id_idx ON jobs (runpod_id) WHERE runpod_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS access_requests_status_created_idx ON access_requests (status, created_at);
 `
 
 // Migrate creates the schema if it is not already present. It also drops the
@@ -139,6 +165,69 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 	if err := addColumnIfMissing(ctx, handle, "jobs", "alignment_json", "TEXT"); err != nil {
 		return fmt.Errorf("migrate: add jobs.alignment_json: %w", err)
 	}
+	// users.role and users.status turn the single bootstrapped account into a
+	// population: role decides who may administer, status decides who reaches
+	// the studio at all. email is optional because the bootstrapped admin never
+	// supplied one.
+	if err := addColumnIfMissing(ctx, handle, "users", "role",
+		"TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user'))"); err != nil {
+		return fmt.Errorf("migrate: add users.role: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, handle, "users", "status",
+		"TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('approved','pending','disabled'))"); err != nil {
+		return fmt.Errorf("migrate: add users.status: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, handle, "users", "email", "TEXT"); err != nil {
+		return fmt.Errorf("migrate: add users.email: %w", err)
+	}
+	// Those defaults are right for an applicant and wrong for the one account
+	// that already exists: they would leave the bootstrapped admin 'pending',
+	// locked out of the app it administers, with nobody able to approve it. The
+	// lowest id is that admin — auth.Bootstrap only ever writes into an empty
+	// table — so it is restored on every pass. Re-running is harmless, and
+	// scoping to MIN(id) means no later account is ever promoted by a restart.
+	if _, err := handle.ExecContext(ctx,
+		`UPDATE users SET role = 'admin', status = 'approved' WHERE id = (SELECT MIN(id) FROM users)`); err != nil {
+		return fmt.Errorf("migrate: restore bootstrap admin: %w", err)
+	}
+	// voices gains ownership. owner_id is the account that cloned the card and
+	// stays nullable: stock cards have no owner, and deleting an account must
+	// orphan its cards rather than destroy them, hence ON DELETE SET NULL. With
+	// is_global alongside it, visibility is `owner_id = ? OR is_global = 1` —
+	// answerable from the voices row alone, no join.
+	if err := addColumnIfMissing(ctx, handle, "voices", "owner_id",
+		"INTEGER REFERENCES users(id) ON DELETE SET NULL"); err != nil {
+		return fmt.Errorf("migrate: add voices.owner_id: %w", err)
+	}
+	hadIsGlobal, err := columnExists(ctx, handle, "voices", "is_global")
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, handle, "voices", "is_global",
+		"INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate: add voices.is_global: %w", err)
+	}
+	if !hadIsGlobal {
+		// Stock cards are the shared library every account starts from, so they
+		// are promoted exactly once: at the moment the flag appears. Doing it on
+		// every pass would silently overrule an admin who later un-globals one.
+		if _, err := handle.ExecContext(ctx,
+			`UPDATE voices SET is_global = 1 WHERE kind = 'stock'`); err != nil {
+			return fmt.Errorf("migrate: backfill voices.is_global: %w", err)
+		}
+	}
+	// voice_assignments supersedes owner_id as the access-control source. Copy
+	// legacy ownership into the junction table so cards created between stages
+	// 01 and 04 stay visible after upgrade. INSERT OR IGNORE makes the backfill
+	// idempotent and preserves any additional many-to-many assignments.
+	if _, err := handle.ExecContext(ctx, `
+		INSERT OR IGNORE INTO voice_assignments (voice_id, user_id)
+		SELECT id, owner_id FROM voices WHERE owner_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("migrate: backfill voice assignments: %w", err)
+	}
+	// jobs needs no change: user_id has been NOT NULL since the table was
+	// created and every query already filters on it, so outputs are isolated by
+	// construction. Recorded here so later work does not re-derive it.
 	return nil
 }
 
@@ -149,12 +238,11 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 // definition are compile-time constants here (never caller input), so
 // interpolating them into the DDL statement is safe.
 func addColumnIfMissing(ctx context.Context, handle *sql.DB, table, column, definition string) error {
-	var count int
-	if err := handle.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
-		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	exists, err := columnExists(ctx, handle, table, column)
+	if err != nil {
+		return err
 	}
-	if count > 0 {
+	if exists {
 		return nil
 	}
 	if _, err := handle.ExecContext(ctx,
@@ -162,6 +250,19 @@ func addColumnIfMissing(ctx context.Context, handle *sql.DB, table, column, defi
 		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
+}
+
+// columnExists reports whether a column is already on a table. Migrate uses it
+// directly when a backfill must run only on the pass that introduces a column,
+// which addColumnIfMissing alone cannot express — it succeeds identically
+// whether it added the column or found it.
+func columnExists(ctx context.Context, handle *sql.DB, table, column string) (bool, error) {
+	var count int
+	if err := handle.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	return count > 0, nil
 }
 
 // dropColumnIfPresent removes column from table when it exists. table and
