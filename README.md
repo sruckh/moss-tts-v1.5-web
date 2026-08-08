@@ -3,9 +3,9 @@
        alt="Timbre — a self-hosted TTS studio. Paste a script, pick a voice, queue the render; the GPU work runs out of band so no request ever waits.">
 </p>
 
-**Timbre** is a self-hosted web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You paste a script, pick or clone a voice, queue renders, and download WAVs. The app owns the queue, the submission, the polling, and the audio.
+**Timbre** is a self-hosted, multi-user web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You apply for an account, an admin approves it, you paste a script, pick or clone a voice, queue renders, and download WAVs — your own jobs and voices only. The app owns accounts, access control, the queue, the submission, the polling, and the audio.
 
-> **Status: complete.** The whole product is built — it serves, migrates, replicates, injects secrets, authenticates, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), captures the worker's optional `word_timings` forced alignment, decodes & saves completed WAV audio files, streams downloads, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, and spoken-line playback that tracks the word being spoken from real per-word timing and names the model it rendered with. [What works today](#what-works-today) is exact.
+> **Status: complete.** The whole product is built — it serves, migrates, replicates, injects secrets, gates every route behind account status, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards, global or assigned per user), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), captures the worker's optional `word_timings` forced alignment, decodes & saves completed WAV audio files, streams downloads scoped to their owner, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, spoken-line playback that tracks the word being spoken from real per-word timing, and an admin surface for accounts, access requests, and voice ownership. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -23,22 +23,41 @@ Two consequences worth knowing before you read the code:
 - **The container publishes no ports.** It is reachable only on the `shared_net` Docker network, where NGINX Proxy Manager forwards a hostname to it and Cloudflare terminates TLS.
 - **Reference audio is sent inline, not via a URL.** The user uploads a sample (drag/drop or file picker); the worker base64-encodes it into the RunPod submission. It is never served from a public URL.
 
+## Accounts and access
+
+Nobody reaches the studio without an approved account, and nobody's jobs or private voices are visible to anyone else. An applicant is a database row an admin has to act on, not a signup that just works.
+
+<p align="center">
+  <img src="./assets/readme/access.svg" width="100%"
+       alt="Access lifecycle. Applying: a visitor posts the public /apply form, which writes a pending access_requests row and creates no account; POST /register is the API twin and creates a pending account instead — neither route issues a session. Admin: the /admin/ surface approves, denies, or disables, its nav badge counting requests still waiting; the last approved admin cannot be disabled, demoted, or deleted, and no admin can demote themselves. Every gated request: the session passes through the approval gate, which reads role and status live from the database, so an approved user reaches the studio and a pending or disabled one gets the holding screen. A voice card is visible when it is global or assigned to you; jobs and downloads are scoped to the session user.">
+</p>
+
+- **Applying creates no session.** `/apply` (browser form) and `POST /register` (its JSON twin) both write an `access_requests` row / a `pending` user and log the applicant straight back out — there is no path from "I filled out a form" to "I'm signed in."
+- **The gate reads live, not from the cookie.** `approvalGate` looks up `role` and `status` by primary key on every request behind a session. Demote an admin or disable a user and the very next request sees it — no stale session keeps them in.
+- **Admin is a role-gated route group, not a checkbox.** `/admin/` manages user status and role, decides access requests (approve creates the account; deny just records the decision), and controls voice visibility and ownership. Its nav link carries a badge counting requests still waiting for a decision, and is not drawn at all for anyone who isn't an admin — a link guaranteed to answer 403 is not navigation.
+- **The last admin is load-bearing.** They cannot be disabled, demoted, or deleted, and no admin can demote their own account — the guard is enforced server-side in the same transaction as the change, not merely hidden in the UI.
+- **Voices and jobs are isolated per user.** A voice card is visible when it is `global` or assigned to the requesting user through the `voice_assignments` table; a clone belongs to whoever uploaded it until an admin reassigns or globalizes it. Every job route resolves by session user, so another user's job id is a 404, never a 403 that would confirm it exists.
+
 ## What works today
 
 | | |
 | --- | --- |
 | ✅ HTTP server, `GET /healthz` → `{"ok":true}`, embedded static assets | Serving |
-| ✅ SQLite schema — `users`, `voices`, `jobs`, `sessions` with constraints and indexes | Migrated on boot |
+| ✅ SQLite schema — `users` (role, status), `voices` (`is_global`), `voice_assignments`, `access_requests`, `jobs`, `sessions`, with constraints and indexes; additive migrations tested from a fresh install and from the pre-multi-user shape | Migrated on boot |
 | ✅ Litestream sidecar replicating to an S3-compatible bucket | Continuous |
 | ✅ Secrets injected from Infisical at container start | No secrets in the repo |
 | ✅ Multi-stage Docker build — templ + Tailwind + `go build`, no host toolchain | `docker compose` only |
-| ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/healthz`, `/static/*` requires auth | Done |
-| ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock seed of the MOSS-TTS v1.5 default voice, cloned voices from uploaded references, `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
-| ✅ Job queue — authenticated `POST /jobs` inserts a `queued` row and returns the queue fragment; `GET /queue` and `GET /jobs` render it | Done |
+| ✅ Login, session, gated routes — bcrypt admin bootstrap, signed session cookie, everything but `/login`, `/register`, `/apply`, `/healthz`, `/static/*` requires auth | Done |
+| ✅ Self-registration & applications — public `/apply` form and `POST /register` both create a `pending` account or request and issue no session; `/apply/status` looks up a decision | Done |
+| ✅ Approval gate — every session-bearing request re-reads `role`/`status` from the database; `pending`/`disabled` accounts see a holding screen, never studio data | Done |
+| ✅ Admin surface at `/admin/` — role-gated: user status/role, access-request approve/deny/delete, voice global toggle + assignment; last-admin and self-demotion guards enforced server-side | Done |
+| ✅ Admin nav badge — the rail's Admin link shows the count of pending access requests, live per page render, hidden for non-admins | Done |
+| ✅ Reference file upload, voice library — authenticated multipart upload (type + size validated), stock seed of the MOSS-TTS v1.5 default voice (global by default), cloned voices assigned to their uploader, `/voices` HTML + JSON view, drag/drop + click-to-pick upload | Done |
+| ✅ Job queue, scoped per user — authenticated `POST /jobs` inserts a `queued` row owned by the session user and returns the queue fragment; `GET /queue` and `GET /jobs` render only that user's jobs | Done |
 | ✅ RunPod submission worker — goroutine started at boot, drains queued jobs under `TIMBRE_MAX_IN_FLIGHT`, POSTs `/run`, stores the returned id, flips to `submitted`/`in_progress`. Submission is idempotent per job and never runs on a browser request | Done |
 | ✅ `GET /health` — session-gated probe of the RunPod endpoint's worker pool and queue depth | Done |
 | ✅ RunPod status poller & audio capture — polls `/status/{id}`, decodes `audio_base64` on `COMPLETED` to WAV, saves to storage volume (`/data/audio/renders/`), and updates job state to `ready` (or `failed`) | Done |
-| ✅ Audio download & job delete routes — authenticated `GET /jobs/{id}/audio` streams WAV file; `DELETE /jobs/{id}` removes DB row and audio file from volume | Done |
+| ✅ Audio download & job delete routes — owner-scoped `GET /jobs/{id}/audio` streams the WAV; `DELETE /jobs/{id}` removes the DB row and file; another user's job id answers 404 at every one of these | Done |
 | ✅ Queue status polling — HTMX `hx-trigger="every 2s"` auto-refreshes queue status in the browser | Done |
 | ✅ Studio UI at `/` — script editor with character meter and one-click clear, parameter fields (Seed, Pace, Pitch, Expressiveness, output toggles), a voice-card library and render-queue table that each show ten entries behind a vertical scrollbar, the table fitting the viewport (icon-only row actions, no horizontal scroll), spoken-line playback | Done |
 | ✅ Pick a take to play — click, or press Enter/Space on, a queue row to highlight it and load that take into the player. The highlight survives the 2s poll, and the poll never interrupts playback | Done |
@@ -49,7 +68,7 @@ Two consequences worth knowing before you read the code:
 | ✅ Palette-exhaustive test — `internal/web/palette_test.go` fails if any color outside the 10 palette hexes appears in compiled CSS or rendered HTML | Enforced in `go test` |
 | ✅ Favicon set — apple-touch-icon, PNG icons, manifest, all embedded and served under `/static/` | Done |
 
-The complete product works end to end: paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with the queue, submission, polling, alignment capture, and storage owned by the app.
+The complete product works end to end: apply, get approved, paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with accounts, access control, the queue, submission, polling, alignment capture, and storage all owned by the app.
 
 ## Quick start
 
@@ -84,7 +103,7 @@ docker compose exec app wget -qO- http://localhost:8080/healthz
 # => {"ok":true}
 ```
 
-On first boot the app seeds the admin user from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (injected by Infisical, or `.env` when running without it) and logs `admin user created` — never the password. Every page except `/login`, `/healthz`, `/static/*` then redirects to `/login` until you sign in.
+On first boot the app seeds the first admin — `role='admin', status='approved'` — from `ADMIN_USERNAME`/`ADMIN_PASSWORD` (injected by Infisical, or `.env` when running without it) and logs `admin user created` — never the password. Every page except `/login`, `/register`, `/apply`, `/healthz`, `/static/*` then redirects to `/login` until you sign in, and everything but a `status='approved'` account sees a holding screen instead of the studio. Anyone else who wants in applies at `/apply`; approve them from `/admin/`.
 
 Run the tests:
 
@@ -145,13 +164,13 @@ The build compiles `internal/web/input.css` to `app.css` with the Tailwind v4 CL
 cmd/timbre/          entry point, graceful shutdown
 internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
-internal/auth/       bcrypt, admin bootstrap, SQLite-backed sessions, middleware
-internal/server/     chi router, login/logout, /healthz + /health, / studio, /voices + upload + rename + reference preview, /queue + /jobs + player fragment + audio download & delete, static assets
-internal/voices/     voice library: MOSS default-voice seed (single-model contract), reference upload, rename (clones only), blob storage + read-back
-internal/jobs/       jobs table: enqueue + validation (records the rendering model), claim/submit/fail state transitions, audio & word-timing metadata (`alignment_json`) & deletion
+internal/auth/       bcrypt, admin bootstrap, registration, live role/status lookup, SQLite-backed sessions, middleware, the access_requests store
+internal/server/     chi router, login/logout, /register + /apply (public), the approval gate, / studio, /voices + upload + rename + reference preview (owner-scoped), /queue + /jobs + player fragment + audio download & delete (owner-scoped), /admin/ (role-gated: users, access requests, voice ownership, nav badge), static assets
+internal/voices/     voice library: MOSS default-voice seed (global, single-model contract), reference upload, per-user visibility via voice_assignments + is_global, admin SetGlobal/Assign/Unassign, rename (clones only), blob storage + read-back
+internal/jobs/       jobs table: enqueue + validation (records the rendering model), claim/submit/fail state transitions, audio & word-timing metadata (`alignment_json`) & deletion, every lookup scoped to a user id
 internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, output decoded as object-or-aggregate-array (incl. the optional `word_timings` forced-alignment block), permanent-vs-transient errors
 internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
-internal/web/        templ app shell + studio + login + voice library + queue + playback, Tailwind theme, favicons, palette test (compiled CSS is embedded)
+internal/web/        templ app shell + studio + login + apply + voice library + queue + playback + admin management, Tailwind theme, favicons, palette test (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), run.sh (start/stop the stack with Infisical injection), sync-generated.sh (LSP support)
 ```
