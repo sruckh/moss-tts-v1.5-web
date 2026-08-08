@@ -61,13 +61,15 @@ const MaxNameLen = 60
 
 // Voice is one row of the voices table.
 type Voice struct {
-	ID            int64  `json:"id"`
-	Kind          string `json:"kind"`
-	Name          string `json:"name"`
-	Model         string `json:"model"`
-	LicenseLabel  string `json:"license_label"`
-	ReferencePath string `json:"-"` // volume-relative path; never exposed
-	CreatedAt     string `json:"created_at"`
+	ID            int64           `json:"id"`
+	Kind          string          `json:"kind"`
+	Name          string          `json:"name"`
+	Model         string          `json:"model"`
+	LicenseLabel  string          `json:"license_label"`
+	ReferencePath string          `json:"-"` // volume-relative path; never exposed
+	CreatedAt     string          `json:"created_at"`
+	OwnerID       sql.Null[int64] `json:"owner_id,omitempty"`
+	IsGlobal      bool            `json:"is_global"`
 }
 
 // Store is the voice-library data access object. It owns both the voices table
@@ -84,12 +86,16 @@ func NewStore(db *sql.DB, audioDir string) *Store {
 	return &Store{db: db, audioDir: audioDir}
 }
 
-// List returns every voice, oldest first (stock seeded before uploads).
-func (s *Store) List(ctx context.Context) ([]Voice, error) {
+// List returns voices accessible to userID through voice_assignments or the
+// global flag, oldest first (stock seeded before uploads).
+func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, name, model, license_label, reference_path, created_at
-		FROM voices
-		ORDER BY created_at, id`)
+		SELECT DISTINCT v.id, v.kind, v.name, v.model, v.license_label,
+			v.reference_path, v.created_at, v.owner_id, v.is_global
+		FROM voices v
+		LEFT JOIN voice_assignments va ON va.voice_id = v.id
+		WHERE v.is_global = 1 OR va.user_id = ?
+		ORDER BY v.created_at, v.id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("voices list: %w", err)
 	}
@@ -98,38 +104,64 @@ func (s *Store) List(ctx context.Context) ([]Voice, error) {
 	var out []Voice
 	for rows.Next() {
 		var (
-			v   Voice
-			ref sql.Null[string] // reference_path is NULL for stock voices
+			v        Voice
+			ref      sql.Null[string] // reference_path is NULL for stock voices
+			isGlobal int
 		)
 		if err := rows.Scan(&v.ID, &v.Kind, &v.Name, &v.Model,
-			&v.LicenseLabel, &ref, &v.CreatedAt); err != nil {
+			&v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal); err != nil {
 			return nil, fmt.Errorf("voices scan: %w", err)
 		}
 		v.ReferencePath = ref.V
+		v.IsGlobal = isGlobal == 1
 		out = append(out, v)
 	}
 	return out, rows.Err()
 }
 
-// CreateCloned stores the reference audio and inserts a kind='cloned' row.
-// ext includes the leading dot (e.g. ".wav") and must already be validated by
-// the caller. The returned id is the new row.
-func (s *Store) CreateCloned(ctx context.Context, name, ext string, data []byte) (int64, error) {
+// CreateCloned stores the reference audio, inserts a kind='cloned' row, and
+// assigns the new card to userID. ext includes the leading dot (e.g. ".wav")
+// and must already be validated by the caller. The returned id is the new row.
+func (s *Store) CreateCloned(ctx context.Context, userID int64, name, ext string, data []byte) (int64, error) {
 	rel, err := s.writeReference(ext, bytes.NewReader(data))
 	if err != nil {
 		return 0, err
 	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO voices (kind, name, model, license_label, reference_path)
-		VALUES ('cloned', ?, 'Cloned', 'Cloned voice', ?)`, name, rel)
+	cleanup := func() { _ = os.Remove(s.absPath(rel)) }
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		// Best effort: remove the orphaned blob so the disk and table agree.
-		_ = os.Remove(s.absPath(rel))
+		cleanup()
+		return 0, fmt.Errorf("begin cloned voice: %w", err)
+	}
+	defer tx.Rollback()
+
+	var ownerArg any
+	if userID > 0 {
+		ownerArg = userID
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO voices (kind, name, model, license_label, reference_path, owner_id, is_global)
+		VALUES ('cloned', ?, 'Cloned', 'Cloned voice', ?, ?, 0)`, name, rel, ownerArg)
+	if err != nil {
+		cleanup()
 		return 0, fmt.Errorf("insert cloned voice: %w", err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		cleanup()
 		return 0, fmt.Errorf("cloned voice id: %w", err)
+	}
+	if userID > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO voice_assignments (voice_id, user_id) VALUES (?, ?)`, id, userID); err != nil {
+			cleanup()
+			return 0, fmt.Errorf("assign cloned voice: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		cleanup()
+		return 0, fmt.Errorf("commit cloned voice: %w", err)
 	}
 	return id, nil
 }
@@ -153,8 +185,8 @@ func (s *Store) SeedStock(ctx context.Context) error {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO voices (kind, name, model, license_label)
-			VALUES ('stock', ?, ?, ?)`, sv.Name, sv.Model, sv.License); err != nil {
+			INSERT INTO voices (kind, name, model, license_label, is_global)
+				VALUES ('stock', ?, ?, ?, 1)`, sv.Name, sv.Model, sv.License); err != nil {
 			return fmt.Errorf("seed stock %q: %w", sv.Name, err)
 		}
 	}
@@ -215,13 +247,14 @@ func (s *Store) ReferenceBytes(ctx context.Context, id int64) ([]byte, error) {
 // Get returns one voice by id.
 func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 	var (
-		v   Voice
-		ref sql.Null[string]
+		v        Voice
+		ref      sql.Null[string]
+		isGlobal int
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, name, model, license_label, reference_path, created_at
+		SELECT id, kind, name, model, license_label, reference_path, created_at, owner_id, is_global
 		FROM voices WHERE id = ?`, id).
-		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt)
+		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Voice{}, ErrNotFound
 	}
@@ -229,7 +262,126 @@ func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 		return Voice{}, fmt.Errorf("get voice: %w", err)
 	}
 	v.ReferencePath = ref.V
+	v.IsGlobal = isGlobal == 1
 	return v, nil
+}
+
+// IsAccessibleToUser reports whether userID may use voiceID. Global cards are
+// available to everyone; private cards require an explicit assignment.
+func (s *Store) IsAccessibleToUser(ctx context.Context, voiceID, userID int64) (bool, error) {
+	var accessible int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM voices v
+			LEFT JOIN voice_assignments va
+				ON va.voice_id = v.id AND va.user_id = ?
+			WHERE v.id = ? AND (v.is_global = 1 OR va.user_id IS NOT NULL)
+		)`, userID, voiceID).Scan(&accessible); err != nil {
+		return false, fmt.Errorf("check voice %d access: %w", voiceID, err)
+	}
+	return accessible == 1, nil
+}
+
+// SetGlobal toggles a voice's is_global flag.
+func (s *Store) SetGlobal(ctx context.Context, id int64, isGlobal bool) error {
+	var globalVal int
+	if isGlobal {
+		globalVal = 1
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE voices SET is_global = ? WHERE id = ?`, globalVal, id)
+	if err != nil {
+		return fmt.Errorf("set global voice %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set global voice %d: %w", id, err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Assign grants userID access through the junction table. owner_id mirrors the
+// most recent assignment for legacy schema compatibility; userID <= 0 clears all assignments.
+func (s *Store) Assign(ctx context.Context, id int64, userID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("assign voice %d: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	if userID <= 0 {
+		res, err := tx.ExecContext(ctx, `UPDATE voices SET owner_id = NULL WHERE id = ?`, id)
+		if err != nil {
+			return fmt.Errorf("assign voice %d: %w", id, err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("assign voice %d: %w", id, err)
+		}
+		if affected == 0 {
+			return ErrNotFound
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM voice_assignments WHERE voice_id = ?`, id); err != nil {
+			return fmt.Errorf("unassign voice %d: %w", id, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("assign voice %d: %w", id, err)
+		}
+		return nil
+	}
+
+	res, err := tx.ExecContext(ctx, `UPDATE voices SET owner_id = ? WHERE id = ?`, userID, id)
+	if err != nil {
+		return fmt.Errorf("assign voice %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("assign voice %d: %w", id, err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO voice_assignments (voice_id, user_id) VALUES (?, ?)`, id, userID); err != nil {
+		return fmt.Errorf("assign voice %d: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("assign voice %d: %w", id, err)
+	}
+	return nil
+}
+
+// Unassign removes one user's access to a voice. It is idempotent: removing a
+// missing assignment succeeds as long as the voice itself exists.
+func (s *Store) Unassign(ctx context.Context, id int64, userID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("unassign voice %d: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM voices WHERE id = ?`, id).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("unassign voice %d: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM voice_assignments WHERE voice_id = ? AND user_id = ?`, id, userID); err != nil {
+		return fmt.Errorf("unassign voice %d: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE voices SET owner_id = NULL WHERE id = ? AND owner_id = ?`, id, userID); err != nil {
+		return fmt.Errorf("unassign voice %d: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("unassign voice %d: %w", id, err)
+	}
+	return nil
 }
 
 // Rename sets a cloned voice's display name. The name an upload derives from

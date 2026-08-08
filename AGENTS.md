@@ -47,8 +47,9 @@ reference, rendered in itself.
   only from cloned references.
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
-  extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row, and
-  returns the refreshed grid fragment; `POST /voices/{id}/name` renames a voice
+  extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row,
+  assigns the new card to the session user, and returns the refreshed grid
+  fragment; `POST /voices/{id}/name` renames a voice
   and returns the same fragment. **Rename is clones-only** — `SeedStock`
   reconciles stock rows *by name*, so a renamed stock row would read as stale on
   the next boot and be deleted, taking every job's voice link with it
@@ -69,6 +70,64 @@ reference, rendered in itself.
   removed — see Goal 3); `TIMBRE_SESSION_SECRET` keys the HMAC, also from Infisical). The
   middleware's public exempt list is defined once in `auth.Exempt` — `/login`,
   `/healthz`, `/static/*`. Everything else 302s to `/login` (401 for HTMX/JSON).
+  `/register` is exempt too — applying for an account cannot require one.
+  **The session carries `user_id`, `role` and `status`,** snapshotted at login.
+  Read them via `auth.Manager.Current(r)` (one session load) rather than `Role`
+  then `Status` (two); `UserID(r)` is unchanged. Use the
+  `auth.Role*`/`auth.Status*` constants, never a bare string. Because role and
+  status snapshots can go stale, authorization gates use
+  `auth.Manager.LiveIdentity` on every protected request: approving, disabling,
+  promoting or demoting an account takes effect on its next request without a
+  session purge. `Login` deliberately admits `pending` and `disabled` users:
+  signing in and reaching the studio are separate questions, and the holding
+  screen needs a session to know who is waiting.
+  **`Bootstrap` writes `role='admin', status='approved'` explicitly.** It runs
+  *after* `db.Migrate` on a fresh install, so the migration's re-promotion of the
+  lowest-id user has already passed over an empty table; leaving this row to the
+  column defaults would strand the first admin as `pending` until a restart.
+  **`POST /register` grants nothing.** It creates a `role='user', status='pending'`
+  row (written explicitly, not via defaults) and issues **no session cookie** —
+  anything that signs the applicant in is a bug. It answers JSON (201/400/409),
+  since the public form is a later concern. Duplicate usernames are caught by the
+  `users.username` UNIQUE constraint, not a prior SELECT, which two concurrent
+  applicants could both pass.
+- **The schema is multi-user-aware, and migrations stay additive.** `users`
+  carries `role` (`admin|user`) and `status` (`approved|pending|disabled`,
+  defaulting to `pending`) plus an optional `email`; `voices` keeps the nullable
+  `owner_id` column for schema compatibility and carries `is_global`, but access
+  no longer comes from `owner_id`. `voice_assignments(voice_id, user_id)` is the
+  many-to-many access source, unique per pair with cascading foreign keys;
+  visibility is `is_global = 1 OR voice_assignments.user_id = ?` and list queries
+  use `DISTINCT` so a global assigned card appears once. `access_requests` holds
+  an application from someone who has no account yet. Three migration data fixes
+  have distinct lifecycles: the lowest-id user is restored to
+  `role='admin', status='approved'` on **every** pass; stock voices are made
+  global **exactly once**, when `is_global` first appears; and legacy non-NULL
+  `owner_id` values are copied with `INSERT OR IGNORE` into
+  `voice_assignments` on every pass so stage-01 clones survive upgrade without
+  duplicating rows. `jobs.user_id` has always been NOT NULL and already isolates
+  outputs; `jobs` gets no ownership column. Use `db.addColumnIfMissing` and
+  guarded `CREATE TABLE IF NOT EXISTS`; never rebuild the schema in place.
+  Structural migration tests assert against a fresh install **and** a database
+  upgraded from the older shape, because the two must not drift
+  (`internal/db/multiuser_migration_test.go`).
+- **Admin management is live-role-gated under `/admin/`.** The group manages
+  user status/roles, access requests, and voice ownership/global visibility;
+  every route re-reads the actor's role from `users`, so demotion is immediate.
+  The final approved admin cannot be disabled, demoted or deleted, and an admin
+  cannot self-demote. User deletion is a hard delete: the server explicitly
+  removes their job rows, `voice_assignments` rows and rendered WAVs, retains
+  voice rows with `owner_id=NULL`, and then deletes the account.
+  Access-request decisions use `auth.AccessRequests`; voice actions use
+  `voices.Store.SetGlobal`/`Assign`/`Unassign` (`/admin/voices/{id}/unassign`
+  revokes one user without disturbing the card's other assignments).
+- **The Admin rail link is admin-only and badges pending requests.**
+  `server.(*Server).navContext(r)` reads the live role, counts
+  `access_requests` with `status='pending'`, and puts a `web.NavState` in the
+  context the four full-page handlers render with; `navLink` in `layout.templ`
+  draws "Admin (3)" when the count is positive. Keep this out of middleware —
+  the rail is only drawn by a whole-page render, and middleware would run the
+  count on every 2s queue poll as well.
 - **The palette is exhaustive**: exactly the ten hexes in `DESIGN.md`. New
   values only ever come from `color-mix()` of two of them.
 - **`/` is the studio.** `internal/web/studio.templ` renders the primary view

@@ -1,5 +1,7 @@
 package web
 
+import "strconv"
+
 // Layout is the document shell every page renders inside: the three typefaces
 // from the living reference, the compiled Tailwind stylesheet, HTMX v4 and
 // Alpine. Page content goes in as children.
@@ -32,8 +34,14 @@ templ Layout(title string) {
 
 // AppShell is the gated app's chrome: a rail with the Timbre mark and section
 // nav, and the page content in main. active names the current section
-// ("studio", "voices", "queue") so its nav link gets the Olive marker.
+// ("studio", "voices", "queue", "admin") so its nav link gets the Olive marker.
+//
+// The Admin entry is drawn only for an administrator — the route answers 403 to
+// anyone else, and a link that is guaranteed to be refused is not navigation.
+// Its badge counts access requests still awaiting a decision; both come from
+// the request context (see NavState), which the page handlers fill in.
 templ AppShell(title, active string) {
+	{{ nav := NavFromContext(ctx) }}
 	@Layout(title) {
 		<div class="mx-auto grid max-w-[1180px] grid-cols-1 gap-0 px-6 lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-12">
 			<aside class="static h-auto self-start overflow-y-auto py-8 lg:sticky lg:top-0 lg:h-screen">
@@ -42,9 +50,12 @@ templ AppShell(title, active string) {
 					Timbre
 				</div>
 				<nav class="flex flex-row flex-wrap gap-1 lg:flex-col lg:gap-[2px] lg:border-l lg:border-line">
-					@navLink("/", "Studio", active == "studio")
-					@navLink("/voices", "Voices", active == "voices")
-					@navLink("/queue", "Queue", active == "queue")
+					@navLink("/", "Studio", active == "studio", 0)
+					@navLink("/voices", "Voices", active == "voices", 0)
+					@navLink("/queue", "Queue", active == "queue", 0)
+					if nav.IsAdmin {
+						@navLink("/admin/", "Admin", active == "admin", nav.PendingRequests)
+					}
 				</nav>
 				<form method="post" action="/logout" class="mt-8">
 					<button type="submit" class="btn btn--quiet btn--sm">Sign out</button>
@@ -59,11 +70,22 @@ templ AppShell(title, active string) {
 
 // navLink is one rail entry: mono uppercase, the active one marked in Olive
 // with an Olive leading border — the keyboard user's "you are here".
-templ navLink(href, label string, on bool) {
+//
+// pending > 0 adds a count badge after the label ("Admin (3)"). Zero renders
+// nothing at all rather than an empty badge: a section with no work waiting
+// should look exactly like every other section.
+templ navLink(href, label string, on bool, pending int) {
 	<a
 		href={ templ.SafeURL(href) }
-		class={ "px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.04em] no-underline transition-colors lg:-ml-px lg:border-l",
+		class={ "inline-flex items-center gap-1.5 px-3 py-1.5 font-mono text-[11.5px] uppercase tracking-[0.04em] no-underline transition-colors lg:-ml-px lg:border-l",
 			templ.KV("text-olive lg:border-olive", on),
 			templ.KV("text-text-faint hover:text-paper lg:border-transparent", !on) }
-	>{ label }</a>
+	>
+		{ label }
+		if pending > 0 {
+			<span class="badge badge--live" title={ pendingRequestsLabel(pending) }>
+				({ strconv.Itoa(pending) })
+			</span>
+		}
+	</a>
 }

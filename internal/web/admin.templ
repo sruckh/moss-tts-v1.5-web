@@ -1,0 +1,284 @@
+package web
+
+import (
+	"strconv"
+
+	"github.com/sruckh/timbre/internal/auth"
+)
+
+// AdminUser is the account summary shown in the management table.
+type AdminUser struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	Email     string `json:"email,omitempty"`
+	Role      string `json:"role"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+}
+
+// AdminVoice is the ownership summary for one card on the management page.
+type AdminVoice struct {
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Model     string `json:"model,omitempty"`
+	OwnerID   int64  `json:"owner_id,omitempty"`
+	OwnerName string `json:"owner_name,omitempty"`
+	IsGlobal  bool   `json:"is_global"`
+	CreatedAt string `json:"created_at"`
+}
+
+// AdminData is the complete management read model.
+type AdminData struct {
+	Users    []AdminUser          `json:"users"`
+	Requests []auth.AccessRequest `json:"requests"`
+	Voices   []AdminVoice         `json:"voices"`
+}
+
+func adminPath(group string, id int64, action string) templ.SafeURL {
+	path := "/admin/" + group + "/" + strconv.FormatInt(id, 10)
+	if action != "" {
+		path += "/" + action
+	}
+	return templ.URL(path)
+}
+
+templ AdminPage(data AdminData) {
+	@AppShell("Administration · Timbre", "admin") {
+		<header class="pb-8">
+			<p class="eyebrow">Administration</p>
+			<h1 class="font-display text-[26px] font-semibold tracking-[-0.02em]">Manage access and ownership</h1>
+			<p class="mt-2 max-w-[68ch] text-text-dim">
+				Approve accounts, revoke studio access, assign voice cards, and control what is shared globally.
+				Every action is checked again on the server; the final approved administrator cannot be removed.
+			</p>
+		</header>
+		@AdminPanel(data)
+	}
+}
+
+templ AdminPanel(data AdminData) {
+	<div id="admin-panel" class="space-y-8">
+		@adminUsers(data.Users)
+		@adminRequests(data.Requests)
+		@adminVoices(data.Voices, data.Users)
+	</div>
+}
+
+templ adminUsers(users []AdminUser) {
+	<section aria-labelledby="admin-users-title">
+		<div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+			<div>
+				<p class="eyebrow">Accounts</p>
+				<h2 id="admin-users-title" class="font-display text-xl font-semibold">Users</h2>
+			</div>
+			<span class="font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">{ strconv.Itoa(len(users)) } total</span>
+		</div>
+		<div class="overflow-x-auto rounded-container border border-line bg-surface-1">
+			<table class="w-full min-w-[760px] border-collapse text-left text-sm">
+				<thead class="border-b border-line font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">
+					<tr>
+						<th class="px-4 py-3 font-medium">Account</th>
+						<th class="px-4 py-3 font-medium">Access</th>
+						<th class="px-4 py-3 font-medium">Role</th>
+						<th class="px-4 py-3 font-medium">Actions</th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-line">
+					for _, user := range users {
+						<tr>
+							<td class="px-4 py-3 align-top">
+								<div class="font-display font-semibold">{ user.Username }</div>
+								if user.Email != "" {
+									<div class="mt-0.5 text-xs text-text-dim">{ user.Email }</div>
+								}
+								<div class="mt-1 font-mono text-[10px] text-text-faint">ID { strconv.FormatInt(user.ID, 10) }</div>
+							</td>
+							<td class="px-4 py-3 align-top">
+								<span class="badge badge--selected">{ user.Status }</span>
+							</td>
+							<td class="px-4 py-3 align-top">
+								<span class="badge">{ user.Role }</span>
+							</td>
+							<td class="px-4 py-3 align-top">
+								<div class="flex flex-wrap gap-2">
+									<form
+										hx-post={ adminPath("users", user.ID, "status") }
+										hx-target="#admin-panel"
+										hx-swap="outerHTML"
+									>
+										if user.Status == auth.StatusApproved {
+											<input type="hidden" name="status" value="disabled"/>
+											<button type="submit" class="btn btn--quiet btn--sm">Disable</button>
+										} else {
+											<input type="hidden" name="status" value="approved"/>
+											<button type="submit" class="btn btn--sm">Approve</button>
+										}
+									</form>
+									<form
+										hx-post={ adminPath("users", user.ID, "role") }
+										hx-target="#admin-panel"
+										hx-swap="outerHTML"
+									>
+										if user.Role == auth.RoleAdmin {
+											<input type="hidden" name="role" value="user"/>
+											<button type="submit" class="btn btn--quiet btn--sm">Make user</button>
+										} else {
+											<input type="hidden" name="role" value="admin"/>
+											<button type="submit" class="btn btn--quiet btn--sm">Make admin</button>
+										}
+									</form>
+									<button
+										type="button"
+										class="btn btn--quiet btn--sm"
+										hx-delete={ adminPath("users", user.ID, "") }
+										hx-target="#admin-panel"
+										hx-swap="outerHTML"
+										hx-confirm="Delete this account, its render jobs, and its WAV files? Voice cards will be retained unassigned."
+									>Delete</button>
+								</div>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	</section>
+}
+
+templ adminRequests(requests []auth.AccessRequest) {
+	<section aria-labelledby="admin-requests-title">
+		<div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+			<div>
+				<p class="eyebrow">Applications</p>
+				<h2 id="admin-requests-title" class="font-display text-xl font-semibold">Access requests</h2>
+			</div>
+			<span class="font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">{ strconv.Itoa(len(requests)) } total</span>
+		</div>
+		<div class="overflow-x-auto rounded-container border border-line bg-surface-1">
+			<table class="w-full min-w-[720px] border-collapse text-left text-sm">
+				<thead class="border-b border-line font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">
+					<tr>
+						<th class="px-4 py-3 font-medium">Applicant</th>
+						<th class="px-4 py-3 font-medium">State</th>
+						<th class="px-4 py-3 font-medium">Created</th>
+						<th class="px-4 py-3 font-medium">Actions</th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-line">
+					if len(requests) == 0 {
+						<tr><td colspan="4" class="px-4 py-8 text-center text-text-dim">No access requests.</td></tr>
+					}
+					for _, request := range requests {
+						<tr>
+							<td class="px-4 py-3 align-top">
+								<div class="font-display font-semibold">{ request.Username }</div>
+								if request.Email != "" {
+									<div class="mt-0.5 text-xs text-text-dim">{ request.Email }</div>
+								}
+							</td>
+							<td class="px-4 py-3 align-top"><span class="badge">{ request.Status }</span></td>
+							<td class="px-4 py-3 align-top font-mono text-xs text-text-dim">{ request.CreatedAt }</td>
+							<td class="px-4 py-3 align-top">
+								<div class="flex flex-wrap gap-2">
+									if request.Status == auth.RequestPending {
+										<form hx-post={ adminPath("requests", request.ID, "approve") } hx-target="#admin-panel" hx-swap="outerHTML">
+											<button type="submit" class="btn btn--sm">Approve</button>
+										</form>
+										<form hx-post={ adminPath("requests", request.ID, "deny") } hx-target="#admin-panel" hx-swap="outerHTML">
+											<button type="submit" class="btn btn--quiet btn--sm">Deny</button>
+										</form>
+									}
+									<button
+										type="button"
+										class="btn btn--quiet btn--sm"
+										hx-delete={ adminPath("requests", request.ID, "") }
+										hx-target="#admin-panel"
+										hx-swap="outerHTML"
+										hx-confirm="Delete this access request?"
+									>Delete</button>
+								</div>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	</section>
+}
+
+templ adminVoices(cards []AdminVoice, users []AdminUser) {
+	<section aria-labelledby="admin-voices-title">
+		<div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+			<div>
+				<p class="eyebrow">Ownership</p>
+				<h2 id="admin-voices-title" class="font-display text-xl font-semibold">Voice cards</h2>
+			</div>
+			<span class="font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">{ strconv.Itoa(len(cards)) } total</span>
+		</div>
+		<div class="overflow-x-auto rounded-container border border-line bg-surface-1">
+			<table class="w-full min-w-[820px] border-collapse text-left text-sm">
+				<thead class="border-b border-line font-mono text-[11px] uppercase tracking-[0.04em] text-text-faint">
+					<tr>
+						<th class="px-4 py-3 font-medium">Voice</th>
+						<th class="px-4 py-3 font-medium">Visibility</th>
+						<th class="px-4 py-3 font-medium">Owner</th>
+						<th class="px-4 py-3 font-medium">Actions</th>
+					</tr>
+				</thead>
+				<tbody class="divide-y divide-line">
+					for _, card := range cards {
+						<tr>
+							<td class="px-4 py-3 align-top">
+								<div class="font-display font-semibold">{ card.Name }</div>
+								<div class="mt-0.5 text-xs text-text-dim">{ card.Kind } · { card.Model }</div>
+							</td>
+							<td class="px-4 py-3 align-top">
+								if card.IsGlobal {
+									<span class="badge badge--selected">Global</span>
+								} else {
+									<span class="badge">Private</span>
+								}
+							</td>
+							<td class="px-4 py-3 align-top">
+								if card.OwnerName != "" {
+									<span>{ card.OwnerName }</span>
+								} else {
+									<span class="text-text-faint">Unassigned</span>
+								}
+							</td>
+							<td class="px-4 py-3 align-top">
+								<div class="flex flex-wrap items-center gap-2">
+									<form hx-post={ adminPath("voices", card.ID, "global") } hx-target="#admin-panel" hx-swap="outerHTML">
+										<input type="hidden" name="is_global" value={ strconv.FormatBool(!card.IsGlobal) }/>
+										if card.IsGlobal {
+											<button type="submit" class="btn btn--quiet btn--sm">Make private</button>
+										} else {
+											<button type="submit" class="btn btn--sm">Make global</button>
+										}
+									</form>
+									<form class="flex items-center gap-2" hx-post={ adminPath("voices", card.ID, "owner") } hx-target="#admin-panel" hx-swap="outerHTML">
+										<label class="sr-only" for={ "voice-owner-" + strconv.FormatInt(card.ID, 10) }>Voice owner</label>
+										<select id={ "voice-owner-" + strconv.FormatInt(card.ID, 10) } name="user_id" class="input min-w-36 py-1.5 text-xs">
+											<option value="0" selected?={ card.OwnerID == 0 }>Unassigned</option>
+											for _, user := range users {
+												<option value={ strconv.FormatInt(user.ID, 10) } selected?={ card.OwnerID == user.ID }>{ user.Username }</option>
+											}
+										</select>
+										<button type="submit" class="btn btn--quiet btn--sm">Assign</button>
+									</form>
+									if card.OwnerID != 0 {
+										<form hx-post={ adminPath("voices", card.ID, "unassign") } hx-target="#admin-panel" hx-swap="outerHTML">
+											<input type="hidden" name="user_id" value={ strconv.FormatInt(card.OwnerID, 10) }/>
+											<button type="submit" class="btn btn--quiet btn--sm">Revoke { card.OwnerName }</button>
+										</form>
+									}
+								</div>
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	</section>
+}

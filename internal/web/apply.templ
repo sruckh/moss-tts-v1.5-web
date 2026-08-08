@@ -1,0 +1,232 @@
+package web
+
+import (
+	"net/url"
+
+	"github.com/sruckh/timbre/internal/auth"
+)
+
+// ApplyStateNone is the answer to a status lookup that matched nothing. It is
+// deliberately not one of the stored statuses — access_requests only ever holds
+// pending/approved/denied — so it lives here rather than in internal/auth.
+const ApplyStateNone = "none"
+
+// ApplyForm is what the applicant typed, handed back so a rejected submission
+// re-renders with the fields still filled. It carries no password: a refused
+// form asks for it again rather than round-tripping a credential through the
+// markup.
+type ApplyForm struct {
+	Username string
+	Email    string
+}
+
+// applyStateAlert maps a request state to one of the three alert variants in
+// input.css. Anything unrecognised falls back to the plain alert, so a state
+// this page has not been taught still renders inside the palette.
+func applyStateAlert(state string) string {
+	switch state {
+	case auth.RequestApproved:
+		return "alert alert--ready"
+	case auth.RequestDenied:
+		return "alert alert--limit"
+	case auth.RequestPending:
+		return "alert alert--working"
+	default:
+		return "alert"
+	}
+}
+
+// applyStateHeading and applyStateBlurb are the only things a status lookup
+// discloses. There is deliberately no email, no decision timestamp and no
+// deciding admin here — the applicant asked where their application stands, not
+// who is handling it.
+func applyStateHeading(state string) string {
+	switch state {
+	case auth.RequestApproved:
+		return "Approved"
+	case auth.RequestDenied:
+		return "Not approved"
+	case auth.RequestPending:
+		return "Waiting for a decision"
+	default:
+		return "No application found"
+	}
+}
+
+func applyStateBlurb(state string) string {
+	switch state {
+	case auth.RequestApproved:
+		return "An administrator approved this application. Your account exists — sign in with the username and password you chose."
+	case auth.RequestDenied:
+		return "An administrator did not approve this application. You may apply again."
+	case auth.RequestPending:
+		return "An administrator has not decided yet. Nothing else is needed from you."
+	default:
+		return "Nothing matches that username or email address. Check the spelling, or apply for access."
+	}
+}
+
+// Apply is the public front door for someone who has no account: a plain form
+// on the same ink canvas as Login. It posts without JavaScript and it is
+// identical with or without a session, because nothing on this path reads one.
+//
+// Submitting it writes an access_requests row and nothing else — no user, no
+// cookie, no studio. An administrator turns the request into an account.
+templ Apply(form ApplyForm, errMsg string) {
+	@Layout("Request access · Timbre") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
+				<div class="mb-4 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				<p class="text-sm text-text-dim">
+					Request access. An administrator reviews every application —
+					sending one creates no account and signs you in to nothing.
+				</p>
+				if errMsg != "" {
+					<div class="alert alert--limit mt-4" role="alert">
+						<div><b>Application not sent</b><p>{ errMsg }</p></div>
+					</div>
+				}
+				<form method="post" action="/apply" class="mt-6 flex flex-col gap-4">
+					<div>
+						<label for="username" class="field-label">Username</label>
+						<input
+							id="username"
+							name="username"
+							type="text"
+							required
+							autofocus
+							autocomplete="username"
+							value={ form.Username }
+							class="input"
+						/>
+					</div>
+					<div>
+						<label for="email" class="field-label">Email (optional)</label>
+						<input
+							id="email"
+							name="email"
+							type="email"
+							autocomplete="email"
+							value={ form.Email }
+							class="input"
+						/>
+					</div>
+					<div>
+						<label for="password" class="field-label">Password</label>
+						<input
+							id="password"
+							name="password"
+							type="password"
+							required
+							minlength="12"
+							autocomplete="new-password"
+							class="input"
+						/>
+						<p class="mt-1.5 text-[12px] text-text-faint">
+							At least 12 characters. It is stored hashed and becomes your
+							sign-in password if the application is approved.
+						</p>
+					</div>
+					<button type="submit" class="btn w-full justify-center">
+						Send application
+					</button>
+				</form>
+				<p class="mt-6 text-[12.5px] text-text-dim">
+					Already applied? <a href="/apply/status" class="text-olive underline">Check its status</a>.
+					<br/>
+					Have an account? <a href="/login" class="text-olive underline">Sign in</a>.
+				</p>
+			</div>
+		</main>
+	}
+}
+
+// ApplySubmitted confirms a stored application. It is the one place that echoes
+// the chosen username back, because the status lookup needs it and the
+// applicant has just typed it.
+templ ApplySubmitted(username string) {
+	@Layout("Application sent · Timbre") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
+				<div class="mb-6 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				<div class="alert alert--working" role="status">
+					<div>
+						<b>Application sent</b>
+						<p>
+							It is waiting for an administrator. There is no account
+							yet, so there is nothing to sign in to until one approves it.
+						</p>
+					</div>
+				</div>
+				<a
+					href={ templ.SafeURL("/apply/status?applicant=" + url.QueryEscape(username)) }
+					class="btn btn--secondary mt-6 w-full justify-center"
+				>
+					Check the status
+				</a>
+			</div>
+		</main>
+	}
+}
+
+// ApplyStatus is the public "where does my application stand" lookup: a single
+// identifier in, one word out. state is a request status, ApplyStateNone when
+// nothing matched, or "" before anything has been looked up.
+//
+// It never renders studio data and never renders a second applicant — the
+// handler resolves exactly one row and passes only its state.
+templ ApplyStatus(query, state string) {
+	@Layout("Application status · Timbre") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
+				<div class="mb-4 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				<p class="text-sm text-text-dim">
+					Look up an application by the username or email address it was sent with.
+				</p>
+				<form method="get" action="/apply/status" class="mt-6 flex flex-col gap-4">
+					<div>
+						<label for="applicant" class="field-label">Username or email</label>
+						<input
+							id="applicant"
+							name="applicant"
+							type="text"
+							required
+							autofocus
+							value={ query }
+							class="input"
+						/>
+					</div>
+					<button type="submit" class="btn w-full justify-center">
+						Check status
+					</button>
+				</form>
+				if state != "" {
+					<div class={ applyStateAlert(state), "mt-6" } role="status">
+						<div>
+							<b>{ applyStateHeading(state) }</b>
+							<p>{ applyStateBlurb(state) }</p>
+						</div>
+					</div>
+					if state == auth.RequestApproved {
+						<a href="/login" class="btn mt-4 w-full justify-center">Sign in</a>
+					}
+					if state == auth.RequestDenied || state == ApplyStateNone {
+						<a href="/apply" class="btn btn--secondary mt-4 w-full justify-center">Apply for access</a>
+					}
+				}
+				<p class="mt-6 text-[12.5px] text-text-dim">
+					<a href="/login" class="text-olive underline">Back to sign in</a>
+				</p>
+			</div>
+		</main>
+	}
+}

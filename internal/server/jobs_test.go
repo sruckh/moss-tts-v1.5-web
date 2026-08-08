@@ -307,7 +307,6 @@ func TestHealthzDoesNotDependOnRunPod(t *testing.T) {
 	}
 }
 
-
 func TestDownloadAudioRoute(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
@@ -373,6 +372,95 @@ func TestDownloadAudioRoute(t *testing.T) {
 	}
 }
 
+func TestJobRoutesDoNotExposeAnotherUsersData(t *testing.T) {
+	srv := newTestServer(t)
+	cookieA := signInAs(t, srv, "job_owner", "approved")
+	cookieB := signInAs(t, srv, "job_other", "approved")
+	voiceID := firstVoiceID(t, srv, cookieA)
+
+	createdRec := postJob(t, srv, cookieA, url.Values{
+		"text":     {"owner-only render"},
+		"voice_id": {strconv.FormatInt(voiceID, 10)},
+	}, "application/json")
+	if createdRec.Code != http.StatusOK {
+		t.Fatalf("create status = %d, want 200 (body %q)", createdRec.Code, createdRec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(createdRec.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode created job %q: %v", createdRec.Body.String(), err)
+	}
+
+	dummyWav := []byte("RIFFprivateWAVEfmt ")
+	audioFile := filepath.Join(t.TempDir(), "owner-only.wav")
+	if err := os.WriteFile(audioFile, dummyWav, 0o640); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := srv.jobs.MarkReady(context.Background(), job.ID, audioFile, "wav", 24000, 10, 50, ""); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+
+	queueReq := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	queueReq.Header.Set("Accept", "application/json")
+	queueReq.AddCookie(cookieB)
+	queueRec := httptest.NewRecorder()
+	srv.ServeHTTP(queueRec, queueReq)
+	if queueRec.Code != http.StatusOK {
+		t.Fatalf("other-user queue status = %d, want 200", queueRec.Code)
+	}
+	var items []jobs.Job
+	if err := json.Unmarshal(queueRec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode other-user queue %q: %v", queueRec.Body.String(), err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("other-user queue = %v, want no jobs", items)
+	}
+
+	for _, path := range []string{"/", "/queue"} {
+		rec := do(t, srv, http.MethodGet, path, cookieB)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", path, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), job.Text) {
+			t.Errorf("GET %s exposed another user's job text", path)
+		}
+	}
+
+	playerPath := "/jobs/" + strconv.FormatInt(job.ID, 10) + "/player"
+	playerRec := do(t, srv, http.MethodGet, playerPath, cookieB)
+	if playerRec.Code != http.StatusNotFound {
+		t.Errorf("other-user player status = %d, want 404", playerRec.Code)
+	}
+	if strings.Contains(playerRec.Body.String(), job.Text) {
+		t.Error("other-user player exposed job text")
+	}
+
+	audioPath := "/jobs/" + strconv.FormatInt(job.ID, 10) + "/audio"
+	audioRec := do(t, srv, http.MethodGet, audioPath, cookieB)
+	if audioRec.Code != http.StatusNotFound {
+		t.Errorf("other-user audio status = %d, want 404", audioRec.Code)
+	}
+	if string(audioRec.Body.Bytes()) == string(dummyWav) {
+		t.Error("other-user audio returned the WAV bytes")
+	}
+
+	deletePath := "/jobs/" + strconv.FormatInt(job.ID, 10)
+	deleteRec := do(t, srv, http.MethodDelete, deletePath, cookieB)
+	if deleteRec.Code != http.StatusNotFound {
+		t.Errorf("other-user delete status = %d, want 404", deleteRec.Code)
+	}
+	if _, err := srv.jobs.Get(context.Background(), job.ID, job.UserID); err != nil {
+		t.Fatalf("job disappeared after wrong-user delete: %v", err)
+	}
+
+	ownerRec := do(t, srv, http.MethodGet, audioPath, cookieA)
+	if ownerRec.Code != http.StatusOK {
+		t.Fatalf("owner audio status = %d, want 200 (body %q)", ownerRec.Code, ownerRec.Body.String())
+	}
+	if string(ownerRec.Body.Bytes()) != string(dummyWav) {
+		t.Errorf("owner audio body = %q, want %q", ownerRec.Body.String(), dummyWav)
+	}
+}
+
 func TestDeleteJobRoute(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
@@ -400,7 +488,7 @@ func TestDeleteJobRoute(t *testing.T) {
 	}
 
 	// Verify job is removed from DB
-	if _, err := srv.jobs.Get(ctx, queuedID); !errors.Is(err, jobs.ErrNotFound) {
+	if _, err := srv.jobs.Get(ctx, queuedID, 1); !errors.Is(err, jobs.ErrNotFound) {
 		t.Errorf("Get queued job after delete err = %v, want ErrNotFound", err)
 	}
 
@@ -433,7 +521,7 @@ func TestDeleteJobRoute(t *testing.T) {
 	}
 
 	// Verify DB row deleted
-	if _, err := srv.jobs.Get(ctx, readyID); !errors.Is(err, jobs.ErrNotFound) {
+	if _, err := srv.jobs.Get(ctx, readyID, 1); !errors.Is(err, jobs.ErrNotFound) {
 		t.Errorf("Get ready job after delete err = %v, want ErrNotFound", err)
 	}
 

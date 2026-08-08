@@ -34,3 +34,6 @@ data/
 .tokensave/
 .claude/
 CLAUDE.md
+
+# ICM workspace scaffolding (spec only, not app source)
+.icm/

@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -36,11 +37,11 @@ func newUploadRequest(t *testing.T, field, filename string, data []byte) *http.R
 
 func voiceCount(t *testing.T, srv *Server) int {
 	t.Helper()
-	items, err := srv.voices.List(context.Background())
-	if err != nil {
-		t.Fatalf("voices.List: %v", err)
+	var count int
+	if err := srv.db.QueryRow("SELECT COUNT(*) FROM voices").Scan(&count); err != nil {
+		t.Fatalf("count voices: %v", err)
 	}
-	return len(items)
+	return count
 }
 
 // clonedID returns the most recently inserted cloned voice's id, failing if
@@ -70,7 +71,7 @@ func TestVoiceLibraryRenders(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Voice library",
-		"MOSS-TTS v1.5",     // the one model this rack runs
+		"MOSS-TTS v1.5",      // the one model this rack runs
 		"OpenMOSS Community", // its license badge, informational
 	} {
 		if !strings.Contains(body, want) {
@@ -199,5 +200,102 @@ func TestVoiceUploadRejectsOversize(t *testing.T) {
 	}
 	if after := voiceCount(t, srv); after != before {
 		t.Errorf("a row was created for an oversize upload: %d -> %d", before, after)
+	}
+}
+
+func TestVoiceLibraryFiltersOtherUsersClones(t *testing.T) {
+	srv := newTestServer(t)
+	cookieA := signInAs(t, srv, "user_a", "approved")
+	cookieB := signInAs(t, srv, "user_b", "approved")
+
+	// User A uploads a clone
+	uploadReq := newUploadRequest(t, "reference", "clone_a.wav", []byte("wavdata"))
+	uploadReq.AddCookie(cookieA)
+	uploadReq.Header.Set("HX-Request", "true")
+	recUpload := httptest.NewRecorder()
+	srv.ServeHTTP(recUpload, uploadReq)
+	if recUpload.Code != http.StatusOK {
+		t.Fatalf("upload by user_a = %d, want 200", recUpload.Code)
+	}
+
+	// User A requests voice library -> sees stock + clone_a
+	reqA := httptest.NewRequest(http.MethodGet, "/voices", nil)
+	reqA.Header.Set("Accept", "application/json")
+	reqA.AddCookie(cookieA)
+	recA := httptest.NewRecorder()
+	srv.ServeHTTP(recA, reqA)
+	var listA []voices.Voice
+	_ = json.Unmarshal(recA.Body.Bytes(), &listA)
+	if len(listA) != 2 {
+		t.Fatalf("User A voice count = %d, want 2", len(listA))
+	}
+
+	// User B requests voice library -> sees stock only (does not see clone_a)
+	reqB := httptest.NewRequest(http.MethodGet, "/voices", nil)
+	reqB.Header.Set("Accept", "application/json")
+	reqB.AddCookie(cookieB)
+	recB := httptest.NewRecorder()
+	srv.ServeHTTP(recB, reqB)
+	var listB []voices.Voice
+	_ = json.Unmarshal(recB.Body.Bytes(), &listB)
+	if len(listB) != 1 {
+		t.Fatalf("User B voice count = %d, want 1 (stock only)", len(listB))
+	}
+}
+
+func TestSubmitJobRejectsNonOwnerVoice(t *testing.T) {
+	srv := newTestServer(t)
+	cookieA := signInAs(t, srv, "user_a", "approved")
+	cookieB := signInAs(t, srv, "user_b", "approved")
+
+	// User A uploads a clone
+	uploadReq := newUploadRequest(t, "reference", "clone_a.wav", []byte("wavdata"))
+	uploadReq.AddCookie(cookieA)
+	recUpload := httptest.NewRecorder()
+	srv.ServeHTTP(recUpload, uploadReq)
+	if recUpload.Code != http.StatusOK {
+		t.Fatalf("upload by user_a = %d, want 200", recUpload.Code)
+	}
+	cloneIDA := clonedID(t, srv)
+
+	// User B attempts to create job with User A's cloned voice -> 403 Forbidden
+	form := strings.NewReader("voice_id=" + strconv.FormatInt(cloneIDA, 10) + "&text=Hello+world")
+	reqJob := httptest.NewRequest(http.MethodPost, "/jobs", form)
+	reqJob.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqJob.AddCookie(cookieB)
+	recJob := httptest.NewRecorder()
+	srv.ServeHTTP(recJob, reqJob)
+
+	if recJob.Code != http.StatusForbidden {
+		t.Fatalf("User B submitting User A's voice status = %d, want 403", recJob.Code)
+	}
+}
+
+func TestSubmitJobAcceptsAssignedVoice(t *testing.T) {
+	srv := newTestServer(t)
+	cookieA := signInAs(t, srv, "user_a", "approved")
+	cookieB := signInAs(t, srv, "user_b", "approved")
+
+	uploadReq := newUploadRequest(t, "reference", "clone_a.wav", []byte("wavdata"))
+	uploadReq.AddCookie(cookieA)
+	recUpload := httptest.NewRecorder()
+	srv.ServeHTTP(recUpload, uploadReq)
+	if recUpload.Code != http.StatusOK {
+		t.Fatalf("upload by user_a = %d, want 200", recUpload.Code)
+	}
+	voiceID := clonedID(t, srv)
+	userB := userIDByName(t, srv, "user_b")
+	if err := srv.voices.Assign(context.Background(), voiceID, userB); err != nil {
+		t.Fatalf("Assign voice to user_b: %v", err)
+	}
+
+	form := strings.NewReader("voice_id=" + strconv.FormatInt(voiceID, 10) + "&text=Hello+world")
+	reqJob := httptest.NewRequest(http.MethodPost, "/jobs", form)
+	reqJob.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqJob.AddCookie(cookieB)
+	recJob := httptest.NewRecorder()
+	srv.ServeHTTP(recJob, reqJob)
+	if recJob.Code != http.StatusOK {
+		t.Fatalf("assigned user submit status = %d, want 200 (body %q)", recJob.Code, recJob.Body.String())
 	}
 }

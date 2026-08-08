@@ -228,9 +228,9 @@ func (s *Store) ListForUser(ctx context.Context, userID int64, limit int) ([]Job
 	return scanJobs(rows)
 }
 
-// Get returns one job by id.
-func (s *Store) Get(ctx context.Context, id int64) (Job, error) {
-	rows, err := s.db.QueryContext(ctx, columns+` WHERE j.id = ?`, id)
+// Get returns one user's job by id.
+func (s *Store) Get(ctx context.Context, id int64, userID int64) (Job, error) {
+	rows, err := s.db.QueryContext(ctx, columns+` WHERE j.id = ? AND j.user_id = ?`, id, userID)
 	if err != nil {
 		return Job{}, fmt.Errorf("get job: %w", err)
 	}
@@ -379,17 +379,13 @@ func (s *Store) MarkReady(ctx context.Context, id int64, audioPath, format strin
 	return nil
 }
 
-// Delete removes a job row by ID and returns the deleted Job (including its AudioPath).
-// If userID > 0, it enforces ownership.
+// Delete removes one user's job row by ID and returns the deleted Job (including its AudioPath).
 func (s *Store) Delete(ctx context.Context, id int64, userID int64) (Job, error) {
-	job, err := s.Get(ctx, id)
+	job, err := s.Get(ctx, id, userID)
 	if err != nil {
 		return Job{}, err
 	}
-	if userID > 0 && job.UserID != userID {
-		return Job{}, ErrNotFound
-	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ? AND user_id = ?`, id, job.UserID)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id = ? AND user_id = ?`, id, userID)
 	if err != nil {
 		return Job{}, fmt.Errorf("delete job %d: %w", id, err)
 	}

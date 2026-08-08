@@ -1,0 +1,61 @@
+package web
+
+// holdingTitle names the tab for each state.
+func holdingTitle(disabled bool) string {
+	if disabled {
+		return "Access disabled · Timbre"
+	}
+	return "Awaiting approval · Timbre"
+}
+
+// Holding is what a signed-in user sees when their account is not approved. The
+// studio and every fragment of its data sit behind it — this page is rendered
+// in place of whatever was asked for, so there is no route it does not cover.
+//
+// Deliberately a bare Layout rather than the AppShell: that rail links to
+// Studio, Voices and Queue, and offering navigation to three places you cannot
+// go is worse than offering none. Signing out is the one action that still
+// makes sense, so it is the only one here.
+//
+// disabled distinguishes the two non-approved states — an application still
+// waiting, and an account an admin has switched off. The wording matters:
+// "waiting" is a state that resolves on its own, "disabled" is one that needs a
+// conversation.
+templ Holding(disabled bool) {
+	@Layout(holdingTitle(disabled)) {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<div class="w-full max-w-sm rounded-container border border-line bg-surface-1 p-8">
+				<div class="mb-6 flex items-center gap-2 font-display text-[19px] font-extrabold tracking-[-0.02em]">
+					<span class="h-[9px] w-[9px] rounded-full bg-olive"></span>
+					Timbre
+				</div>
+				if disabled {
+					<div class="alert alert--limit" role="alert">
+						<div>
+							<b>Access disabled</b>
+							<p>
+								An administrator has switched this account off. Get in
+								touch with them if you think that is a mistake.
+							</p>
+						</div>
+					</div>
+				} else {
+					<div class="alert alert--working" role="status">
+						<div>
+							<b>Waiting for approval</b>
+							<p>
+								Your account exists, but an administrator has not
+								approved it yet. The studio opens as soon as they do.
+							</p>
+						</div>
+					</div>
+				}
+				<form method="post" action="/logout" class="mt-6">
+					<button type="submit" class="btn btn--quiet w-full justify-center">
+						Sign out
+					</button>
+				</form>
+			</div>
+		</main>
+	}
+}

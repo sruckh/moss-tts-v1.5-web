@@ -37,12 +37,12 @@ func (s *Server) handleStudio(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	available, err := s.voices.List(r.Context())
+	available, err := s.voices.List(r.Context(), userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
 	}
-	_ = web.Studio(items, available, audioDurations(items), selectedTake(r)).Render(r.Context(), w)
+	_ = web.Studio(items, available, audioDurations(items), selectedTake(r)).Render(s.navContext(r), w)
 }
 
 // selectedTake reads the take the queue is showing in the player. The queue
@@ -71,12 +71,12 @@ func (s *Server) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	available, err := s.voices.List(r.Context())
+	available, err := s.voices.List(r.Context(), userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
 	}
-	_ = web.QueuePage(items, available, audioDurations(items), selectedTake(r)).Render(r.Context(), w)
+	_ = web.QueuePage(items, available, audioDurations(items), selectedTake(r)).Render(s.navContext(r), w)
 }
 
 // handleQueue answers GET /jobs with the queue fragment (or the row list, for
@@ -120,12 +120,22 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	// The voice must exist: a job pinned to a phantom id would only fail later,
 	// in the worker, where the user never sees why.
-	if _, err := s.voices.Get(r.Context(), voiceID); err != nil {
+	v, err := s.voices.Get(r.Context(), voiceID)
+	if err != nil {
 		if errors.Is(err, voices.ErrNotFound) {
 			http.Error(w, "that voice no longer exists", http.StatusBadRequest)
 			return
 		}
 		serverError(w, r, err)
+		return
+	}
+	accessible, err := s.voices.IsAccessibleToUser(r.Context(), v.ID, userID)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	if !accessible {
+		http.Error(w, "you do not have access to that voice", http.StatusForbidden)
 		return
 	}
 
@@ -154,7 +164,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if wantsJSON(r) {
-		created, err := s.jobs.Get(r.Context(), id)
+		created, err := s.jobs.Get(r.Context(), id, userID)
 		if err != nil {
 			serverError(w, r, err)
 			return
@@ -207,7 +217,7 @@ func (s *Server) handleJobPlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := s.jobs.Get(r.Context(), id)
+	job, err := s.jobs.Get(r.Context(), id, userID)
 	if err != nil {
 		if errors.Is(err, jobs.ErrNotFound) {
 			http.Error(w, "job not found", http.StatusNotFound)
@@ -330,7 +340,7 @@ func (s *Server) handleDownloadAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := s.jobs.Get(r.Context(), id)
+	job, err := s.jobs.Get(r.Context(), id, userID)
 	if err != nil {
 		if errors.Is(err, jobs.ErrNotFound) {
 			http.Error(w, "job not found", http.StatusNotFound)

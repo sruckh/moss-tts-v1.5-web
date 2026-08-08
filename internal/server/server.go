@@ -28,6 +28,7 @@ type Server struct {
 	cfg    config.Config
 	db     *sql.DB
 	auth   *auth.Manager
+	access *auth.AccessRequests
 	voices *voices.Store
 	jobs   *jobs.Store
 	runpod *runpod.Client
@@ -43,6 +44,7 @@ func New(cfg config.Config, database *sql.DB, authManager *auth.Manager,
 		cfg:    cfg,
 		db:     database,
 		auth:   authManager,
+		access: auth.NewAccessRequests(database),
 		voices: voiceStore,
 		jobs:   jobStore,
 		runpod: runpodClient,
@@ -60,14 +62,40 @@ func (s *Server) routes() {
 	s.router.Use(middleware.Recoverer)
 	// Everything not on auth's exempt list requires a session.
 	s.router.Use(s.auth.Middleware)
+	// ...and a session alone is not enough: only an approved account reaches the
+	// studio. Ordered after the session gate, which is what guarantees there is
+	// a user to check.
+	s.router.Use(s.approvalGate)
 
 	s.router.Get("/healthz", s.handleHealth)
 	s.router.Get("/login", s.handleLoginPage)
 	s.router.Post("/login", s.handleLogin)
 	s.router.Post("/logout", s.handleLogout)
+	// Public: applying for an account cannot require one. Creates a 'pending'
+	// user and issues no session.
+	s.router.Post("/register", s.handleRegister)
+	// ...and the browser-facing version of the same idea: the application form,
+	// and the lookup that tells an applicant where their request stands. Both
+	// write or read access_requests only and neither issues a session.
+	s.router.Get("/apply", s.handleApplyPage)
+	s.router.Post("/apply", s.handleApply)
+	s.router.Get("/apply/status", s.handleApplyStatus)
 	s.router.Handle("/static/*", http.StripPrefix("/static/",
 		http.FileServer(http.FS(web.StaticFS()))))
 	s.router.Get("/health", s.handleRunPodHealth)
+	s.router.Route("/admin", func(r chi.Router) {
+		r.Use(s.adminOnly)
+		r.Get("/", s.handleAdmin)
+		r.Post("/users/{id}/status", s.handleAdminUserStatus)
+		r.Post("/users/{id}/role", s.handleAdminUserRole)
+		r.Delete("/users/{id}", s.handleAdminDeleteUser)
+		r.Post("/requests/{id}/approve", s.handleAdminApproveRequest)
+		r.Post("/requests/{id}/deny", s.handleAdminDenyRequest)
+		r.Delete("/requests/{id}", s.handleAdminDeleteRequest)
+		r.Post("/voices/{id}/global", s.handleAdminVoiceGlobal)
+		r.Post("/voices/{id}/owner", s.handleAdminVoiceOwner)
+		r.Post("/voices/{id}/unassign", s.handleAdminVoiceUnassign)
+	})
 	s.router.Get("/voices", s.handleVoiceLibrary)
 	s.router.Post("/voices/upload", s.handleVoiceUpload)
 	s.router.Post("/voices/{id}/name", s.handleVoiceRename)
