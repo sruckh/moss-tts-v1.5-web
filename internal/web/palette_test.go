@@ -101,7 +101,12 @@ func TestPaletteExhaustiveRenderedHTML(t *testing.T) {
 		},
 		Voices: []AdminVoice{
 			{ID: 1, Kind: voices.KindStock, Name: "Moss", Model: "MOSS-TTS v1.5", IsGlobal: true},
-			{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", OwnerID: 2, OwnerName: "reader"},
+			// Two assignees on one private card: the case that a single-owner
+			// field can't represent, and the reason the palette test renders it.
+			{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", Assignees: []AdminVoiceAssignee{
+				{UserID: 1, Username: "admin"},
+				{UserID: 2, Username: "reader"},
+			}},
 		},
 	}
 

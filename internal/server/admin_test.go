@@ -253,6 +253,70 @@ func TestAdminManagesVoiceVisibilityAndOwner(t *testing.T) {
 	}
 }
 
+// The admin page must render every assignee a card has, not just the most
+// recently added one — a single "Owner" field on the read model would hide
+// every grant but the last, which is the bug this test guards against.
+func TestAdminPageShowsAllAssigneesOnAPrivateCard(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	_ = signInAs(t, srv, "first_holder", auth.StatusApproved)
+	_ = signInAs(t, srv, "second_holder", auth.StatusApproved)
+	firstID := userIDByName(t, srv, "first_holder")
+	secondID := userIDByName(t, srv, "second_holder")
+	voiceID := firstVoiceID(t, srv, cookie)
+	id := strconv.FormatInt(voiceID, 10)
+
+	for _, action := range []struct {
+		path string
+		form url.Values
+	}{
+		{"/admin/voices/" + id + "/global", url.Values{"is_global": {"false"}}},
+		{"/admin/voices/" + id + "/owner", url.Values{"user_id": {strconv.FormatInt(firstID, 10)}}},
+		{"/admin/voices/" + id + "/owner", url.Values{"user_id": {strconv.FormatInt(secondID, 10)}}},
+	} {
+		rec := adminAction(t, srv, cookie, http.MethodPost, action.path, action.form)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s status = %d, want 200 (body %q)", action.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/ status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	// Both accounts appear regardless (the Users table lists every account), so
+	// the revoke control's aria-label is what proves the *card* — not just the
+	// page — lists both: it names the assignee it would remove.
+	body := rec.Body.String()
+	for _, want := range []string{"Revoke first_holder", "Revoke second_holder"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("admin page after two grants on one card is missing %q — only the last assignee rendered", want)
+		}
+	}
+
+	// Revoking one must remove only that grant, leaving the other assignee.
+	rec = adminAction(t, srv, cookie, http.MethodPost, "/admin/voices/"+id+"/unassign",
+		url.Values{"user_id": {strconv.FormatInt(firstID, 10)}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unassign status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	body = rec.Body.String()
+	if strings.Contains(body, "Revoke first_holder") {
+		t.Error("admin page still offers to revoke first_holder after their access was already revoked")
+	}
+	if !strings.Contains(body, "Revoke second_holder") {
+		t.Error("admin page lost second_holder's grant after revoking a different user's access")
+	}
+}
+
 // Access is a junction table, so revoking one person's grant must leave every
 // other grant on the same card standing.
 func TestAdminUnassignRevokesOnlyThatUsersAccess(t *testing.T) {

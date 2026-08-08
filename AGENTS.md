@@ -121,6 +121,15 @@ reference, rendered in itself.
   Access-request decisions use `auth.AccessRequests`; voice actions use
   `voices.Store.SetGlobal`/`Assign`/`Unassign` (`/admin/voices/{id}/unassign`
   revokes one user without disturbing the card's other assignments).
+  **A private card's access is many-to-many, not single-owner** —
+  `voice_assignments` can (and routinely does) hold several rows for the same
+  card. `server.(*Server).adminVoices` reflects that: it joins
+  `voice_assignments` to list every current assignee per card
+  (`web.AdminVoice.Assignees`), never the legacy `voices.owner_id` mirror
+  column alone, which only ever names the most recent grant and would hide
+  every earlier one still in force. The admin UI's "Add access" control is
+  additive and "Revoke" is per-assignee — assigning a second user never
+  displaces the first.
 - **The Admin rail link is admin-only and badges pending requests.**
   `server.(*Server).navContext(r)` reads the live role, counts
   `access_requests` with `status='pending'`, and puts a `web.NavState` in the

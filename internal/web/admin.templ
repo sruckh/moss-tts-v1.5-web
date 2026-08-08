@@ -16,16 +16,25 @@ type AdminUser struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// AdminVoiceAssignee is one user with an explicit grant on a private voice
+// card, via the voice_assignments junction table.
+type AdminVoiceAssignee struct {
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+}
+
 // AdminVoice is the ownership summary for one card on the management page.
+// Assignees is every user currently granted access — a card is many-to-many,
+// not single-owner, so this is always a list, even when it holds zero or one
+// entry.
 type AdminVoice struct {
-	ID        int64  `json:"id"`
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Model     string `json:"model,omitempty"`
-	OwnerID   int64  `json:"owner_id,omitempty"`
-	OwnerName string `json:"owner_name,omitempty"`
-	IsGlobal  bool   `json:"is_global"`
-	CreatedAt string `json:"created_at"`
+	ID        int64                 `json:"id"`
+	Kind      string                `json:"kind"`
+	Name      string                `json:"name"`
+	Model     string                `json:"model,omitempty"`
+	Assignees []AdminVoiceAssignee  `json:"assignees,omitempty"`
+	IsGlobal  bool                  `json:"is_global"`
+	CreatedAt string                `json:"created_at"`
 }
 
 // AdminData is the complete management read model.
@@ -41,6 +50,29 @@ func adminPath(group string, id int64, action string) templ.SafeURL {
 		path += "/" + action
 	}
 	return templ.URL(path)
+}
+
+// isAssigned reports whether userID already holds an explicit grant on card.
+func isAssigned(card AdminVoice, userID int64) bool {
+	for _, assignee := range card.Assignees {
+		if assignee.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// unassignableUsers is every known user not yet granted access to card — the
+// "add access" control has nothing left to offer once everyone already holds
+// a grant.
+func unassignableUsers(card AdminVoice, users []AdminUser) []AdminUser {
+	out := make([]AdminUser, 0, len(users))
+	for _, user := range users {
+		if !isAssigned(card, user.ID) {
+			out = append(out, user)
+		}
+	}
+	return out
 }
 
 templ AdminPage(data AdminData) {
@@ -222,7 +254,7 @@ templ adminVoices(cards []AdminVoice, users []AdminUser) {
 					<tr>
 						<th class="px-4 py-3 font-medium">Voice</th>
 						<th class="px-4 py-3 font-medium">Visibility</th>
-						<th class="px-4 py-3 font-medium">Owner</th>
+						<th class="px-4 py-3 font-medium">Access</th>
 						<th class="px-4 py-3 font-medium">Actions</th>
 					</tr>
 				</thead>
@@ -241,10 +273,27 @@ templ adminVoices(cards []AdminVoice, users []AdminUser) {
 								}
 							</td>
 							<td class="px-4 py-3 align-top">
-								if card.OwnerName != "" {
-									<span>{ card.OwnerName }</span>
+								<!--
+									A card is many-to-many: zero, one, or several users can hold
+									an explicit grant at once, so this is always a list — never a
+									single "owner" field — and adding a new grant leaves every
+									existing one in place.
+								-->
+								if len(card.Assignees) == 0 {
+									<span class="text-text-faint">No one assigned</span>
 								} else {
-									<span class="text-text-faint">Unassigned</span>
+									<div class="flex flex-wrap gap-1.5">
+										for _, assignee := range card.Assignees {
+											<form hx-post={ adminPath("voices", card.ID, "unassign") } hx-target="#admin-panel" hx-swap="outerHTML">
+												<input type="hidden" name="user_id" value={ strconv.FormatInt(assignee.UserID, 10) }/>
+												<button
+													type="submit"
+													class="badge badge--selected"
+													aria-label={ "Revoke " + assignee.Username + "'s access" }
+												>{ assignee.Username } ×</button>
+											</form>
+										}
+									</div>
 								}
 							</td>
 							<td class="px-4 py-3 align-top">
@@ -257,20 +306,16 @@ templ adminVoices(cards []AdminVoice, users []AdminUser) {
 											<button type="submit" class="btn btn--sm">Make global</button>
 										}
 									</form>
-									<form class="flex items-center gap-2" hx-post={ adminPath("voices", card.ID, "owner") } hx-target="#admin-panel" hx-swap="outerHTML">
-										<label class="sr-only" for={ "voice-owner-" + strconv.FormatInt(card.ID, 10) }>Voice owner</label>
-										<select id={ "voice-owner-" + strconv.FormatInt(card.ID, 10) } name="user_id" class="input min-w-36 py-1.5 text-xs">
-											<option value="0" selected?={ card.OwnerID == 0 }>Unassigned</option>
-											for _, user := range users {
-												<option value={ strconv.FormatInt(user.ID, 10) } selected?={ card.OwnerID == user.ID }>{ user.Username }</option>
-											}
-										</select>
-										<button type="submit" class="btn btn--quiet btn--sm">Assign</button>
-									</form>
-									if card.OwnerID != 0 {
-										<form hx-post={ adminPath("voices", card.ID, "unassign") } hx-target="#admin-panel" hx-swap="outerHTML">
-											<input type="hidden" name="user_id" value={ strconv.FormatInt(card.OwnerID, 10) }/>
-											<button type="submit" class="btn btn--quiet btn--sm">Revoke { card.OwnerName }</button>
+									{{ addable := unassignableUsers(card, users) }}
+									if len(addable) > 0 {
+										<form class="flex items-center gap-2" hx-post={ adminPath("voices", card.ID, "owner") } hx-target="#admin-panel" hx-swap="outerHTML">
+											<label class="sr-only" for={ "voice-add-" + strconv.FormatInt(card.ID, 10) }>Add access</label>
+											<select id={ "voice-add-" + strconv.FormatInt(card.ID, 10) } name="user_id" class="input min-w-36 py-1.5 text-xs">
+												for _, user := range addable {
+													<option value={ strconv.FormatInt(user.ID, 10) }>{ user.Username }</option>
+												}
+											</select>
+											<button type="submit" class="btn btn--quiet btn--sm">Add access</button>
 										</form>
 									}
 								</div>

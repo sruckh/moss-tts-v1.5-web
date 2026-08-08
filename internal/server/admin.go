@@ -117,12 +117,15 @@ func (s *Server) adminUsers(ctx context.Context) ([]web.AdminUser, error) {
 	return out, nil
 }
 
+// adminVoices lists every voice card with every user currently granted access
+// to it. Access is many-to-many through voice_assignments, so this is a
+// one-to-many fetch (card -> assignees), not a single LEFT JOIN on the legacy
+// owner_id mirror column — that column reflects only the most recent grant
+// and would hide every earlier one still in force.
 func (s *Server) adminVoices(ctx context.Context) ([]web.AdminVoice, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT v.id, v.kind, v.name, COALESCE(v.model, ''),
-		       v.owner_id, COALESCE(u.username, ''), v.is_global, v.created_at
+		SELECT v.id, v.kind, v.name, COALESCE(v.model, ''), v.is_global, v.created_at
 		FROM voices v
-		LEFT JOIN users u ON u.id = v.owner_id
 		ORDER BY v.created_at, v.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list admin voices: %w", err)
@@ -132,20 +135,43 @@ func (s *Server) adminVoices(ctx context.Context) ([]web.AdminVoice, error) {
 	var out []web.AdminVoice
 	for rows.Next() {
 		var card web.AdminVoice
-		var owner sql.Null[int64]
 		var global int
-		if err := rows.Scan(&card.ID, &card.Kind, &card.Name, &card.Model,
-			&owner, &card.OwnerName, &global, &card.CreatedAt); err != nil {
+		if err := rows.Scan(&card.ID, &card.Kind, &card.Name, &card.Model, &global, &card.CreatedAt); err != nil {
 			return nil, fmt.Errorf("list admin voices: scan: %w", err)
-		}
-		if owner.Valid {
-			card.OwnerID = owner.V
 		}
 		card.IsGlobal = global != 0
 		out = append(out, card)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list admin voices: %w", err)
+	}
+
+	byVoiceID := make(map[int64]*web.AdminVoice, len(out))
+	for i := range out {
+		byVoiceID[out[i].ID] = &out[i]
+	}
+
+	assignRows, err := s.db.QueryContext(ctx, `
+		SELECT va.voice_id, u.id, u.username
+		FROM voice_assignments va
+		JOIN users u ON u.id = va.user_id
+		ORDER BY va.voice_id, u.username`)
+	if err != nil {
+		return nil, fmt.Errorf("list voice assignments: %w", err)
+	}
+	defer assignRows.Close()
+	for assignRows.Next() {
+		var voiceID int64
+		var assignee web.AdminVoiceAssignee
+		if err := assignRows.Scan(&voiceID, &assignee.UserID, &assignee.Username); err != nil {
+			return nil, fmt.Errorf("list voice assignments: scan: %w", err)
+		}
+		if card, ok := byVoiceID[voiceID]; ok {
+			card.Assignees = append(card.Assignees, assignee)
+		}
+	}
+	if err := assignRows.Err(); err != nil {
+		return nil, fmt.Errorf("list voice assignments: %w", err)
 	}
 	return out, nil
 }
@@ -318,6 +344,12 @@ func (s *Server) handleAdminVoiceGlobal(w http.ResponseWriter, r *http.Request) 
 	s.adminActionDone(w, r)
 }
 
+// handleAdminVoiceOwner grants a user access to a card. Access is
+// many-to-many: this adds a grant alongside whatever the card already has, it
+// never replaces one user with another. user_id=0 is the one exception — an
+// admin-only reset that clears every existing grant at once, kept for the
+// API but no longer offered by the UI now that individual revoke (see
+// handleAdminVoiceUnassign) covers the normal case.
 func (s *Server) handleAdminVoiceOwner(w http.ResponseWriter, r *http.Request) {
 	id, err := adminRouteID(r)
 	if err != nil {
