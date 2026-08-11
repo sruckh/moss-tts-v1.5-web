@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+#
+# whisper-server sidecar: transcribes cached voice reference audio for Higgs
+# TTS over a private HTTP API on shared_net. Never reachable from the host and
+# never handed application secrets — see docker-compose.yml.
+#
+# Architecture: ADR 002 (private whisper-server sidecar over cgo/embedded).
+#   .icm/higgs-tts-whisper/stages/02-whisper-architecture/output/adr-whisper-runtime.md
+# Operations plan (image, model, health, resources):
+#   .icm/higgs-tts-whisper/stages/06-container-operations/output/container-and-operations-plan.md
+
+# --- build: compile whisper-server from a pinned whisper.cpp release ---------
+FROM alpine:3.20 AS build
+RUN apk add --no-cache build-base cmake git bash curl
+WORKDIR /src
+# Pinned tag, not a branch: the sidecar's build must be reproducible.
+RUN git clone --depth 1 --branch v1.7.1 https://github.com/ggml-org/whisper.cpp.git .
+# v1.7.1's example binaries predate the whisper-* naming convention: the
+# server example's CMake target and output binary are both named "server".
+# BUILD_SHARED_LIBS=OFF (not GGML_STATIC, which only adds a `-static` link
+# flag and breaks musl's PIE relocations) statically links ggml/whisper into
+# the binary, so only libstdc++ is needed at runtime, not a copied .so.
+RUN cmake -B build -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF \
+ && cmake --build build --config Release --target server -j"$(nproc)"
+# Baked into the image (not downloaded at runtime) so the whisper_models named
+# volume — empty on first `docker compose up` — is auto-seeded by Docker from
+# this directory. The container mounts that volume read-only and never writes
+# to /models itself. Fetched directly with curl (same source URL as
+# models/download-ggml-model.sh) — that script always finds Alpine's built-in
+# busybox wget applet first, and busybox wget rejects the flags it passes.
+RUN curl -fL --output models/ggml-base.en.bin \
+      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+# --- runtime: ffmpeg (required by --convert) + the compiled binary -----------
+FROM alpine:3.20 AS runtime
+RUN apk add --no-cache ffmpeg ca-certificates wget libstdc++ \
+ && adduser -D -u 10002 whisper
+COPY --from=build /src/build/bin/server /usr/local/bin/whisper-server
+COPY --from=build /src/models/ggml-base.en.bin /models/ggml-base.en.bin
+RUN chown -R whisper:whisper /models
+
+USER whisper
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/whisper-server"]
+# --convert: accept non-WAV reference uploads (mp3/flac/ogg/m4a) via ffmpeg.
+CMD ["--host", "0.0.0.0", "--port", "8080", "-m", "/models/ggml-base.en.bin", "-t", "4", "--convert"]

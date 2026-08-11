@@ -100,13 +100,13 @@ func ariaSelected(selected bool) string {
 // land without it.
 func queuePollURL(selected int64) string {
 	if selected > 0 {
-		return "/jobs?take=" + strconv.FormatInt(selected, 10)
+		return "/jobs/queue?take=" + strconv.FormatInt(selected, 10)
 	}
-	return "/jobs"
+	return "/jobs/queue"
 }
 
-// Queue is the swap target: the whole queue, returned by both GET /jobs and
-// POST /jobs so HTMX can refresh it in place. Its root carries id="queue" and
+// Queue is the swap target: the whole queue, returned by GET /jobs/queue,
+// compatibility GET /jobs, and POST /jobs so HTMX can refresh it in place. Its root carries id="queue" and
 // polls every 2s — the browser never talks to RunPod, only to this fragment.
 //
 // justQueued is the id of a job enqueued by the request being answered; it
@@ -126,6 +126,7 @@ templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, sele
 		hx-get={ queuePollURL(selected) }
 		hx-trigger="every 2s"
 		hx-swap="outerHTML"
+		aria-live="polite"
 		data-take={ strconv.FormatInt(selected, 10) }
 		class="flex flex-col gap-3"
 	>
@@ -190,6 +191,9 @@ templ queueRow(j jobs.Job, durations map[int64]string, selected bool) {
 		<td>
 			<div class="flex flex-wrap items-center gap-2">
 				<span class="font-display text-[14px] font-semibold tracking-[-0.01em]">Take { strconv.FormatInt(j.ID, 10) }</span>
+				if j.Model != "" {
+					<span class="badge badge--info">{ j.Model }</span>
+				}
 				<span class="badge badge--selected queue-mark"><span class="dot"></span> In the player</span>
 			</div>
 			<div class="mt-0.5 text-[12px] break-words text-text-dim">{ excerpt(j.Text) }</div>

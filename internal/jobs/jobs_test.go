@@ -110,6 +110,39 @@ func TestEnqueueValidation(t *testing.T) {
 	}
 }
 
+func TestResolveModel(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "blank defaults to MOSS", want: DefaultModel},
+		{name: "whitespace defaults to MOSS", input: " \t ", want: DefaultModel},
+		{name: "explicit MOSS", input: DefaultModel, want: DefaultModel},
+		{name: "explicit Higgs", input: HiggsModel, want: HiggsModel},
+		{name: "unknown", input: "other-engine", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveModel(tc.input)
+			if tc.wantErr {
+				if !errors.Is(err, ErrModel) {
+					t.Fatalf("ResolveModel(%q) err = %v, want ErrModel", tc.input, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveModel(%q): %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Errorf("ResolveModel(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMarkSubmittedIsCompareAndSet(t *testing.T) {
 	store, userID, voiceID := newTestStore(t)
 	ctx := context.Background()

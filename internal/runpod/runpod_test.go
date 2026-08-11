@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -323,6 +324,273 @@ func TestConfigured(t *testing.T) {
 	}
 	if !New("https://api.runpod.ai/v2/x/", "k").Configured() {
 		t.Error("fully configured client reported unconfigured")
+	}
+}
+
+// decodeHiggsInput reads the {"input": {...}} body a Higgs submission posts.
+func decodeHiggsInput(t *testing.T, r *http.Request) map[string]any {
+	t.Helper()
+
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var envelope struct {
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	return envelope.Input
+}
+
+// Criterion 3: stock/default voice request formatting, and the voice: null
+// prohibition.
+func TestHiggsPayloadFormattingStockVoice(t *testing.T) {
+	var gotInput map[string]any
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInput = decodeHiggsInput(t, r)
+		_, _ = io.WriteString(w, `{"id":"higgs-1","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "test-key", WithHiggsEndpoint(double.URL), WithHTTPClient(double.Client()))
+	got, err := client.SubmitHiggs(context.Background(), HiggsInput{Text: "The quick brown fox."})
+	if err != nil {
+		t.Fatalf("SubmitHiggs: %v", err)
+	}
+	if got.ID != "higgs-1" {
+		t.Errorf("ID = %q, want higgs-1", got.ID)
+	}
+
+	if gotInput["input"] != "The quick brown fox." {
+		t.Errorf("input.input = %v, want the script text", gotInput["input"])
+	}
+	if gotInput["model"] != HiggsModel {
+		t.Errorf("input.model = %v, want %s", gotInput["model"], HiggsModel)
+	}
+	if v, present := gotInput["voice"]; !present || v != "default" {
+		t.Errorf("input.voice = %v (present=%v), want the string default, never null", v, present)
+	}
+	if gotInput["response_format"] != "wav" {
+		t.Errorf("input.response_format = %v, want wav", gotInput["response_format"])
+	}
+	if gotInput["speed"] != float64(1.0) {
+		t.Errorf("input.speed = %v, want 1.0", gotInput["speed"])
+	}
+	if gotInput["temperature"] != float64(0.8) {
+		t.Errorf("input.temperature = %v, want 0.8", gotInput["temperature"])
+	}
+	if gotInput["top_k"] != float64(50) {
+		t.Errorf("input.top_k = %v, want 50", gotInput["top_k"])
+	}
+	if gotInput["stream"] != false {
+		t.Errorf("input.stream = %v, want false", gotInput["stream"])
+	}
+	if _, present := gotInput["references"]; present {
+		t.Error("a request with no references must not send a references key")
+	}
+}
+
+// Criterion 3: cloned reference request formatting — references[].audio_base64,
+// references[].text, references[].audio_format.
+func TestHiggsPayloadFormattingClonedReference(t *testing.T) {
+	var gotInput map[string]any
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInput = decodeHiggsInput(t, r)
+		_, _ = io.WriteString(w, `{"id":"higgs-2","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "k", WithHiggsEndpoint(double.URL), WithHTTPClient(double.Client()))
+	_, err := client.SubmitHiggs(context.Background(), HiggsInput{
+		Text: "hello",
+		References: []HiggsReference{
+			{Audio: []byte("ABC"), Text: "This is the transcript.", Format: "wav"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SubmitHiggs: %v", err)
+	}
+
+	refs, ok := gotInput["references"].([]any)
+	if !ok || len(refs) != 1 {
+		t.Fatalf("references = %v, want a one-element array", gotInput["references"])
+	}
+	ref, ok := refs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("references[0] = %v, want an object", refs[0])
+	}
+	if ref["audio_base64"] != base64.StdEncoding.EncodeToString([]byte("ABC")) {
+		t.Errorf("audio_base64 = %v, want the encoded reference bytes", ref["audio_base64"])
+	}
+	if ref["text"] != "This is the transcript." {
+		t.Errorf("text = %v, want the transcript", ref["text"])
+	}
+	if ref["audio_format"] != "wav" {
+		t.Errorf("audio_format = %v, want wav", ref["audio_format"])
+	}
+	if gotInput["voice"] != "default" {
+		t.Errorf("voice = %v, want default even with a reference clip", gotInput["voice"])
+	}
+}
+
+// Criterion 4: at most higgsMaxReferences clips.
+func TestValidateHiggsReferencesTooMany(t *testing.T) {
+	refs := make([]HiggsReference, higgsMaxReferences+1)
+	for i := range refs {
+		refs[i] = HiggsReference{Audio: []byte("x"), Text: "t", Format: "wav"}
+	}
+	err := ValidateHiggsReferences(refs)
+	if err == nil {
+		t.Fatal("want an error for too many references")
+	}
+	if !IsPermanent(err) {
+		t.Error("a reference-count violation must be permanent — retrying cannot fix it")
+	}
+}
+
+// Criterion 4: 4 MiB decoded per reference.
+func TestValidateHiggsReferencesPerReferenceLimit(t *testing.T) {
+	refs := []HiggsReference{{Audio: make([]byte, higgsMaxReferenceBytes+1), Text: "t", Format: "wav"}}
+	if err := ValidateHiggsReferences(refs); err == nil {
+		t.Fatal("want an error for a reference over the per-clip limit")
+	}
+}
+
+// Criterion 4: 6 MiB decoded total, even when no single reference is over the
+// per-clip limit.
+func TestValidateHiggsReferencesTotalLimit(t *testing.T) {
+	refs := make([]HiggsReference, higgsMaxReferences)
+	for i := range refs {
+		refs[i] = HiggsReference{Audio: make([]byte, higgsMaxReferenceBytes), Text: "t", Format: "wav"}
+	}
+	if err := ValidateHiggsReferences(refs); err == nil {
+		t.Fatal("want an error: 4 references at the 4 MiB cap total 16 MiB, over the 6 MiB limit")
+	}
+}
+
+func TestValidateHiggsReferencesRequiresText(t *testing.T) {
+	refs := []HiggsReference{{Audio: []byte("x"), Text: "   ", Format: "wav"}}
+	if err := ValidateHiggsReferences(refs); err == nil {
+		t.Fatal("want an error for a reference without a transcript")
+	}
+}
+
+func TestValidateHiggsReferencesWithinLimitsPasses(t *testing.T) {
+	refs := []HiggsReference{
+		{Audio: []byte("x"), Text: "t", Format: "wav"},
+		{Audio: []byte("y"), Text: "t", Format: "mp3"},
+	}
+	if err := ValidateHiggsReferences(refs); err != nil {
+		t.Errorf("ValidateHiggsReferences: %v, want nil", err)
+	}
+}
+
+// A validation failure must never reach the network — an oversized payload
+// should not spend a RunPod request just to be rejected upstream.
+func TestSubmitHiggsRejectsOversizedPayloadWithoutNetworkCall(t *testing.T) {
+	var hits int
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"id":"x","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "k", WithHiggsEndpoint(double.URL), WithHTTPClient(double.Client()))
+	refs := make([]HiggsReference, higgsMaxReferences+1)
+	for i := range refs {
+		refs[i] = HiggsReference{Audio: []byte("x"), Text: "t", Format: "wav"}
+	}
+	_, err := client.SubmitHiggs(context.Background(), HiggsInput{Text: "hi", References: refs})
+	if err == nil {
+		t.Fatal("want a validation error")
+	}
+	if !IsPermanent(err) {
+		t.Error("a validation error must be permanent")
+	}
+	if hits != 0 {
+		t.Errorf("network calls = %d, want 0 — validation must happen before any request", hits)
+	}
+}
+
+func TestSubmitHiggsWithoutEndpoint(t *testing.T) {
+	client := New("https://api.runpod.ai/v2/moss", "key") // no WithHiggsEndpoint
+	_, err := client.SubmitHiggs(context.Background(), HiggsInput{Text: "hi"})
+	if !errors.Is(err, ErrNoHiggsEndpoint) {
+		t.Fatalf("err = %v, want ErrNoHiggsEndpoint", err)
+	}
+	if !IsPermanent(err) {
+		t.Error("a missing Higgs endpoint must be permanent")
+	}
+}
+
+// Criterion 2: the refactored Client routes MOSS and Higgs requests to their
+// own configured endpoints — neither ever reaches the other's server.
+func TestMOSSAndHiggsRouteToDistinctEndpoints(t *testing.T) {
+	var mossHits, higgsHits int
+	var mossAuth, higgsAuth string
+
+	moss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mossHits++
+		mossAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"id":"moss-1","status":"IN_QUEUE"}`)
+	}))
+	defer moss.Close()
+	higgs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		higgsHits++
+		higgsAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"id":"higgs-1","status":"IN_QUEUE"}`)
+	}))
+	defer higgs.Close()
+
+	client := New(moss.URL, "shared-key", WithHiggsEndpoint(higgs.URL), WithHTTPClient(moss.Client()))
+
+	if _, err := client.Submit(context.Background(), Input{Text: "hi"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if _, err := client.SubmitHiggs(context.Background(), HiggsInput{Text: "hi"}); err != nil {
+		t.Fatalf("SubmitHiggs: %v", err)
+	}
+
+	if mossHits != 1 {
+		t.Errorf("moss endpoint hits = %d, want 1", mossHits)
+	}
+	if higgsHits != 1 {
+		t.Errorf("higgs endpoint hits = %d, want 1 — SubmitHiggs must not hit the MOSS endpoint", higgsHits)
+	}
+	if mossAuth != "Bearer shared-key" || higgsAuth != "Bearer shared-key" {
+		t.Errorf("auth = %q / %q, want both endpoints to share the same bearer token", mossAuth, higgsAuth)
+	}
+}
+
+func TestStatusHiggsQueriesHiggsEndpoint(t *testing.T) {
+	var gotPath string
+	higgs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"higgs-9","status":"COMPLETED","output":{"audio_base64":"QUJD","format":"wav"}}`)
+	}))
+	defer higgs.Close()
+
+	client := New("", "k", WithHiggsEndpoint(higgs.URL), WithHTTPClient(higgs.Client()))
+	got, err := client.StatusHiggs(context.Background(), "higgs-9")
+	if err != nil {
+		t.Fatalf("StatusHiggs: %v", err)
+	}
+	if gotPath != "/status/higgs-9" {
+		t.Errorf("path = %q, want /status/higgs-9", gotPath)
+	}
+	if got.Output.AudioBase64 != "QUJD" {
+		t.Errorf("audio_base64 = %q, want QUJD", got.Output.AudioBase64)
+	}
+}
+
+func TestStatusHiggsWithoutEndpoint(t *testing.T) {
+	client := New("https://api.runpod.ai/v2/moss", "key")
+	_, err := client.StatusHiggs(context.Background(), "x")
+	if !errors.Is(err, ErrNoHiggsEndpoint) {
+		t.Fatalf("err = %v, want ErrNoHiggsEndpoint", err)
 	}
 }
 

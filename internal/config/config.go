@@ -30,6 +30,14 @@ const SecureCookiesEnv = "TIMBRE_SECURE_COOKIES"
 // a server-side value either way — the browser never calls RunPod directly.
 const RunPodEndpointEnv = "RUNPOD_ENDPOINT"
 
+
+// HiggsRunPodEndpointEnv names the variable holding the Higgs TTS
+// (bosonai/higgs-tts-3-4b) serverless endpoint, e.g.
+// https://api.runpod.ai/v2/<higgs-endpoint-id>. A second, separately
+// deployed endpoint from RUNPOD_ENDPOINT — Higgs requests are never routed
+// through the MOSS endpoint. Authenticates with the same RUNPOD_API_KEY.
+const HiggsRunPodEndpointEnv = "HIGGS_RUNPOD_ENDPOINT"
+
 // Config is the fully resolved runtime configuration.
 type Config struct {
 	// Addr is the listen address. No host port is published; NGINX Proxy
@@ -42,10 +50,19 @@ type Config struct {
 	// AudioDir holds rendered WAVs and uploaded reference samples.
 	AudioDir string
 
-	// RunPodEndpoint is the base URL for /run, /status/{id}, /health.
+	// RunPodEndpoint is the base URL for MOSS-TTS v1.5's /run, /status/{id},
+	// /health.
 	RunPodEndpoint string
 
+	// HiggsRunPodEndpoint is the base URL for the Higgs TTS
+	// (bosonai/higgs-tts-3-4b) RunPod Serverless endpoint's /run and
+	// /status/{id}. A distinct deployment from RunPodEndpoint — never a
+	// reinterpretation of the MOSS endpoint.
+	HiggsRunPodEndpoint string
+
 	// RunPodAPIKey is the bearer token. Injected by Infisical at runtime.
+	// Shared across both RunPodEndpoint and HiggsRunPodEndpoint — reusing one
+	// credential for both endpoints is an approved project decision.
 	RunPodAPIKey string
 
 	// AdminUsername and AdminPassword seed the first user on startup when the
@@ -66,14 +83,15 @@ type Config struct {
 // Load reads configuration from the environment, applying defaults.
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:           env("TIMBRE_ADDR", ":8080"),
-		DBPath:         env("TIMBRE_DB_PATH", "/data/timbre.db"),
-		AudioDir:       env("TIMBRE_AUDIO_DIR", "/data/audio"),
-		RunPodEndpoint: strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
-		RunPodAPIKey:   os.Getenv("RUNPOD_API_KEY"),
-		AdminUsername:  os.Getenv("ADMIN_USERNAME"),
-		AdminPassword:  os.Getenv("ADMIN_PASSWORD"),
-		SessionSecret:  os.Getenv("TIMBRE_SESSION_SECRET"),
+		Addr:                env("TIMBRE_ADDR", ":8080"),
+		DBPath:              env("TIMBRE_DB_PATH", "/data/timbre.db"),
+		AudioDir:            env("TIMBRE_AUDIO_DIR", "/data/audio"),
+		RunPodEndpoint:      strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
+		HiggsRunPodEndpoint: strings.TrimRight(os.Getenv(HiggsRunPodEndpointEnv), "/"),
+		RunPodAPIKey:        os.Getenv("RUNPOD_API_KEY"),
+		AdminUsername:       os.Getenv("ADMIN_USERNAME"),
+		AdminPassword:       os.Getenv("ADMIN_PASSWORD"),
+		SessionSecret:       os.Getenv("TIMBRE_SESSION_SECRET"),
 	}
 
 	maxInFlight, err := strconv.Atoi(env("TIMBRE_MAX_IN_FLIGHT", "2"))

@@ -28,6 +28,7 @@ type PollerJobStore interface {
 // StatusClient is the RunPod status query interface.
 type StatusClient interface {
 	Status(ctx context.Context, id string) (runpod.StatusResult, error)
+	StatusHiggs(ctx context.Context, id string) (runpod.StatusResult, error)
 }
 
 // Poller checks RunPod status for submitted/in_progress jobs, saves audio on completion,
@@ -107,7 +108,13 @@ func (p *Poller) Tick(ctx context.Context) {
 }
 
 func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
-	res, err := p.client.Status(ctx, job.RunPodID)
+	var res runpod.StatusResult
+	var err error
+	if job.IsHiggs() {
+		res, err = p.client.StatusHiggs(ctx, job.RunPodID)
+	} else {
+		res, err = p.client.Status(ctx, job.RunPodID)
+	}
 	if err != nil {
 		if runpod.IsPermanent(err) {
 			p.log.Error("poller: status query rejected permanently", "job", job.ID, "runpod_id", job.RunPodID, "err", err)

@@ -35,6 +35,38 @@ func TestLoadTrimsTrailingSlashes(t *testing.T) {
 	}
 }
 
+// Criterion 1 of Goal 03: HIGGS_RUNPOD_ENDPOINT loads independently of
+// RUNPOD_ENDPOINT — a second, separately deployed endpoint, not a
+// reinterpretation of the MOSS one.
+func TestLoadHiggsEndpoint(t *testing.T) {
+	t.Setenv("RUNPOD_ENDPOINT", "https://api.runpod.ai/v2/moss-id")
+	t.Setenv(HiggsRunPodEndpointEnv, "https://api.runpod.ai/v2/higgs-id/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RunPodEndpoint != "https://api.runpod.ai/v2/moss-id" {
+		t.Errorf("RunPodEndpoint = %q, want the MOSS endpoint unchanged", cfg.RunPodEndpoint)
+	}
+	if cfg.HiggsRunPodEndpoint != "https://api.runpod.ai/v2/higgs-id" {
+		t.Errorf("HiggsRunPodEndpoint = %q, want the Higgs endpoint trimmed of its trailing slash", cfg.HiggsRunPodEndpoint)
+	}
+}
+
+func TestLoadHiggsEndpointDefaultsEmpty(t *testing.T) {
+	t.Setenv(HiggsRunPodEndpointEnv, "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HiggsRunPodEndpoint != "" {
+		t.Errorf("HiggsRunPodEndpoint = %q, want empty when %s is unset",
+			cfg.HiggsRunPodEndpoint, HiggsRunPodEndpointEnv)
+	}
+}
+
 func TestSecureCookiesOptIn(t *testing.T) {
 	// Defaults to off — local HTTP testing must keep the cookie usable.
 	t.Setenv(SecureCookiesEnv, "")

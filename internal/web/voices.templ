@@ -3,6 +3,7 @@ package web
 import (
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/sruckh/timbre/internal/voices"
 )
@@ -53,6 +54,13 @@ func badgeLabel(v voices.Voice) string {
 		return "Commercial-safe"
 	}
 	return v.LicenseLabel
+}
+
+// transcriptionReady reports whether a cloned voice has non-blank reference
+// text persisted for Higgs. Missing text stays non-blocking: the worker owns
+// eager/lazy transcription and the card simply reports its current readiness.
+func transcriptionReady(v voices.Voice) bool {
+	return v.ReferenceTranscript.Valid && strings.TrimSpace(v.ReferenceTranscript.V) != ""
 }
 
 // permissiveLicense reports whether a stock model's license is a known
@@ -138,7 +146,7 @@ templ voiceCard(v voices.Voice, selected bool) {
 		aria-pressed={ ariaPressed(selected) }
 		data-voice-id={ strconv.FormatInt(v.ID, 10) }
 		x-data="{ editing: false, ...voicePreview() }"
-		class="voice-card flex cursor-pointer flex-col gap-3 rounded-container border border-line bg-surface-1 p-4 text-left transition-colors hover:border-line-loud"
+		class="voice-card flex cursor-pointer flex-col gap-3 rounded-container border border-line bg-surface-1 p-4 text-left transition-colors hover:border-line-loud focus:ring-2 focus:ring-indigo"
 	>
 		<div class="flex items-start justify-between gap-3">
 			<div class="min-w-0 flex-1">
@@ -169,9 +177,18 @@ templ voiceCard(v voices.Voice, selected bool) {
 				}
 				<div class="mt-0.5 font-mono text-[11px] text-text-faint">{ voiceModelLine(v) }</div>
 			</div>
-			<span class={ "badge shrink-0", badgeClass(v) }>
-				{ badgeLabel(v) }
-			</span>
+			<div class="flex flex-wrap items-center justify-end gap-1">
+				<span class={ "badge shrink-0", badgeClass(v) }>
+					{ badgeLabel(v) }
+				</span>
+				if v.Kind == voices.KindCloned {
+					if transcriptionReady(v) {
+						<span class="badge badge--ready">Ready</span>
+					} else {
+						<span class="badge badge--working">Transcribing...</span>
+					}
+				}
+			</div>
 		</div>
 		<div class="flex h-[26px] items-center gap-0.5" aria-hidden="true">
 			for _, h := range miniWaveHeights(int(v.ID)) {

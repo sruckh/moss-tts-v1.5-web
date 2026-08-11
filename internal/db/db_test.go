@@ -123,3 +123,16 @@ func TestMigrateAddsAlignmentJSON(t *testing.T) {
 		t.Errorf("jobs.alignment_json column count = %d, want 1", count)
 	}
 }
+
+func TestMigrateAddsVoiceReferenceTranscript(t *testing.T) {
+	handle := openTestDB(t)
+
+	var count int
+	if err := handle.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('voices') WHERE name = 'reference_transcript'`).Scan(&count); err != nil {
+		t.Fatalf("query column: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("voices.reference_transcript column count = %d, want 1", count)
+	}
+}

@@ -81,7 +81,8 @@ func run(log *slog.Logger) error {
 	log.Info("voice library ready", "stock_seed", "done")
 
 	jobStore := jobs.NewStore(handle)
-	runpodClient := runpod.New(cfg.RunPodEndpoint, cfg.RunPodAPIKey)
+	runpodClient := runpod.New(cfg.RunPodEndpoint, cfg.RunPodAPIKey,
+		runpod.WithHiggsEndpoint(cfg.HiggsRunPodEndpoint))
 
 	// The submission worker is the only caller of RunPod. It starts even when
 	// the endpoint or key is missing: queued jobs then fail with a recorded

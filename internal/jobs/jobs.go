@@ -35,12 +35,13 @@ const MaxTextRunes = 5000
 // MaxLanguageLen bounds the optional language hint ("English", "Chinese", ...).
 const MaxLanguageLen = 64
 
-// DefaultModel names the model this rack renders with. It is recorded on every
-// job at enqueue time so a take stays attributable to what produced it — there
-// is one model today, and a WAV rendered now must still say so once there are
-// several. This is the single source for that name; the UI reads it from the
-// stored job, never from a literal.
-const DefaultModel = "MOSS-TTS v1.5"
+// DefaultModel is the backwards-compatible engine selected when a browser or
+// API caller omits model. HiggsModel is the only alternate engine exposed by
+// the studio; both values are stored verbatim in jobs.model for attribution.
+const (
+	DefaultModel = "MOSS-TTS v1.5"
+	HiggsModel   = "bosonai/higgs-tts-3-4b"
+)
 
 // Validation failures from Enqueue. The handler maps each to a 400 with the
 // error text, so the messages are user-facing.
@@ -49,6 +50,7 @@ var (
 	ErrTextTooLong = fmt.Errorf("text is longer than %d characters", MaxTextRunes)
 	ErrLanguage    = errors.New("language hint is too long")
 	ErrNoVoice     = errors.New("pick a voice")
+	ErrModel       = errors.New("choose MOSS-TTS v1.5 or Higgs TTS 3.4B")
 )
 
 // ErrNotFound is returned when no job matches the query.
@@ -131,12 +133,33 @@ type NewJob struct {
 // answers IN_QUEUE to a fresh submission and, on a warm worker, occasionally
 // IN_PROGRESS already; anything unexpected is recorded as submitted, since the
 // job demonstrably reached RunPod.
+// ResolveModel accepts the two engines exposed by the studio. Blank input keeps
+// existing clients on MOSS; Store.Enqueue remains intentionally permissive for
+// internal callers that need to retain historical or future model attribution.
+func ResolveModel(model string) (string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return DefaultModel, nil
+	}
+	switch model {
+	case DefaultModel, HiggsModel:
+		return model, nil
+	default:
+		return "", ErrModel
+	}
+}
+
 func StatusForRunPod(runpodStatus string) string {
 	if strings.EqualFold(runpodStatus, "IN_PROGRESS") {
 		return StatusInProgress
 	}
 	return StatusSubmitted
 }
+
+// IsHiggs reports whether this job targets the Higgs engine endpoint rather
+// than the default MOSS path. It is the single source of truth for routing a
+// job to the correct RunPod endpoint on both submit and poll.
+func (j Job) IsHiggs() bool { return j.Model == HiggsModel }
 
 // Store is the jobs data access object.
 type Store struct {

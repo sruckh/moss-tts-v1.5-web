@@ -68,15 +68,16 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS voices (
-	id             INTEGER PRIMARY KEY AUTOINCREMENT,
-	kind           TEXT    NOT NULL CHECK (kind IN ('stock','cloned')),
-	name           TEXT    NOT NULL,
-	model          TEXT,
-	license_label  TEXT,
-	reference_path TEXT,
-	created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
-	owner_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-	is_global      INTEGER NOT NULL DEFAULT 0
+	id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind                 TEXT    NOT NULL CHECK (kind IN ('stock','cloned')),
+	name                 TEXT    NOT NULL,
+	model                TEXT,
+	license_label        TEXT,
+	reference_path       TEXT,
+	created_at           TEXT    NOT NULL DEFAULT (datetime('now')),
+	owner_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	is_global            INTEGER NOT NULL DEFAULT 0,
+	reference_transcript TEXT
 );
 
 CREATE TABLE IF NOT EXISTS voice_assignments (
@@ -224,6 +225,11 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 		INSERT OR IGNORE INTO voice_assignments (voice_id, user_id)
 		SELECT id, owner_id FROM voices WHERE owner_id IS NOT NULL`); err != nil {
 		return fmt.Errorf("migrate: backfill voice assignments: %w", err)
+	}
+	// voices.reference_transcript stores the text transcript of reference audio
+	// for cloned voices, required for Higgs TTS synthesis.
+	if err := addColumnIfMissing(ctx, handle, "voices", "reference_transcript", "TEXT"); err != nil {
+		return fmt.Errorf("migrate: add voices.reference_transcript: %w", err)
 	}
 	// jobs needs no change: user_id has been NOT NULL since the table was
 	// created and every query already filters on it, so outputs are isolated by

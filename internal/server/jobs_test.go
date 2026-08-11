@@ -89,6 +89,9 @@ func TestCreateJobEnqueuesQueuedRow(t *testing.T) {
 	if created.Language != "English" {
 		t.Errorf("Language = %q, want English", created.Language)
 	}
+	if created.Model != jobs.DefaultModel {
+		t.Errorf("Model = %q, want %q", created.Model, jobs.DefaultModel)
+	}
 	// The browser request must never have reached RunPod.
 	if created.RunPodID != "" {
 		t.Errorf("RunPodID = %q — the enqueue handler must not submit", created.RunPodID)
@@ -164,6 +167,120 @@ func TestCreateJobValidation(t *testing.T) {
 				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestCreateJobEngineSelection(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "blank defaults to MOSS", want: jobs.DefaultModel},
+		{name: "whitespace defaults to MOSS", model: "  ", want: jobs.DefaultModel},
+		{name: "explicit MOSS", model: jobs.DefaultModel, want: jobs.DefaultModel},
+		{name: "explicit Higgs", model: jobs.HiggsModel, want: jobs.HiggsModel},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			cookie := login(t, srv)
+			voiceID := firstVoiceID(t, srv, cookie)
+			rec := postJob(t, srv, cookie, url.Values{
+				"text":     {"Engine selection."},
+				"voice_id": {strconv.FormatInt(voiceID, 10)},
+				"model":    {tc.model},
+			}, "application/json")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+			}
+			var created jobs.Job
+			if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+				t.Fatalf("decode %q: %v", rec.Body.String(), err)
+			}
+			if created.Model != tc.want {
+				t.Errorf("Model = %q, want %q", created.Model, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateJobRejectsUnknownEngine(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voiceID := firstVoiceID(t, srv, cookie)
+
+	rec := postJob(t, srv, cookie, url.Values{
+		"text":     {"Do not queue this."},
+		"voice_id": {strconv.FormatInt(voiceID, 10)},
+		"model":    {"unknown-engine"},
+	}, "application/json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), jobs.ErrModel.Error()) {
+		t.Errorf("body = %q, want model validation error", rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	queue := httptest.NewRecorder()
+	srv.ServeHTTP(queue, req)
+	var items []jobs.Job
+	if err := json.Unmarshal(queue.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode queue %q: %v", queue.Body.String(), err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("queue has %d jobs after rejected model, want 0", len(items))
+	}
+}
+
+func TestJobQueueRouteCapsAtTenRows(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voiceID := firstVoiceID(t, srv, cookie)
+
+	for i := 0; i < queueLimit+2; i++ {
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":     {"Take " + strconv.Itoa(i)},
+			"voice_id": {strconv.FormatInt(voiceID, 10)},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("enqueue %d status = %d, want 200 (body %q)", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs/queue", nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("JSON queue status = %d, want 200", rec.Code)
+	}
+	var items []jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode queue %q: %v", rec.Body.String(), err)
+	}
+	if len(items) != queueLimit {
+		t.Fatalf("queue returned %d jobs, want %d", len(items), queueLimit)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/jobs/queue", nil)
+	htmlReq.AddCookie(cookie)
+	htmlRec := httptest.NewRecorder()
+	srv.ServeHTTP(htmlRec, htmlReq)
+	body := htmlRec.Body.String()
+	if !strings.Contains(body, `id="queue"`) {
+		t.Error("dedicated route did not return the queue fragment")
+	}
+	if strings.Contains(body, `id="playback-body"`) || strings.Contains(body, "<audio") {
+		t.Error("queue fragment contains player markup")
+	}
+	if got := strings.Count(body, `id="job-`); got != queueLimit {
+		t.Errorf("queue fragment rendered %d rows, want %d", got, queueLimit)
 	}
 }
 

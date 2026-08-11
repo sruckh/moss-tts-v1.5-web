@@ -61,15 +61,16 @@ const MaxNameLen = 60
 
 // Voice is one row of the voices table.
 type Voice struct {
-	ID            int64           `json:"id"`
-	Kind          string          `json:"kind"`
-	Name          string          `json:"name"`
-	Model         string          `json:"model"`
-	LicenseLabel  string          `json:"license_label"`
-	ReferencePath string          `json:"-"` // volume-relative path; never exposed
-	CreatedAt     string          `json:"created_at"`
-	OwnerID       sql.Null[int64] `json:"owner_id,omitempty"`
-	IsGlobal      bool            `json:"is_global"`
+	ID                  int64            `json:"id"`
+	Kind                string           `json:"kind"`
+	Name                string           `json:"name"`
+	Model               string           `json:"model"`
+	LicenseLabel        string           `json:"license_label"`
+	ReferencePath       string           `json:"-"` // volume-relative path; never exposed
+	ReferenceTranscript sql.Null[string] `json:"reference_transcript"`
+	CreatedAt           string           `json:"created_at"`
+	OwnerID             sql.Null[int64]  `json:"owner_id"`
+	IsGlobal            bool             `json:"is_global"`
 }
 
 // Store is the voice-library data access object. It owns both the voices table
@@ -91,7 +92,7 @@ func NewStore(db *sql.DB, audioDir string) *Store {
 func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT v.id, v.kind, v.name, v.model, v.license_label,
-			v.reference_path, v.created_at, v.owner_id, v.is_global
+			v.reference_path, v.created_at, v.owner_id, v.is_global, v.reference_transcript
 		FROM voices v
 		LEFT JOIN voice_assignments va ON va.voice_id = v.id
 		WHERE v.is_global = 1 OR va.user_id = ?
@@ -109,7 +110,7 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 			isGlobal int
 		)
 		if err := rows.Scan(&v.ID, &v.Kind, &v.Name, &v.Model,
-			&v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal); err != nil {
+			&v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal, &v.ReferenceTranscript); err != nil {
 			return nil, fmt.Errorf("voices scan: %w", err)
 		}
 		v.ReferencePath = ref.V
@@ -252,9 +253,9 @@ func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 		isGlobal int
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, name, model, license_label, reference_path, created_at, owner_id, is_global
+		SELECT id, kind, name, model, license_label, reference_path, created_at, owner_id, is_global, reference_transcript
 		FROM voices WHERE id = ?`, id).
-		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal)
+		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal, &v.ReferenceTranscript)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Voice{}, ErrNotFound
 	}
@@ -264,6 +265,40 @@ func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 	v.ReferencePath = ref.V
 	v.IsGlobal = isGlobal == 1
 	return v, nil
+}
+
+// SetReferenceTranscript updates the reference_transcript for a cloned voice.
+func (s *Store) SetReferenceTranscript(ctx context.Context, id int64, transcript string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE voices SET reference_transcript = ? WHERE id = ? AND kind = 'cloned'`, transcript, id)
+	if err != nil {
+		return fmt.Errorf("set reference transcript for voice %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set reference transcript for voice %d: %w", id, err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearReferenceTranscript sets reference_transcript to NULL for a voice.
+func (s *Store) ClearReferenceTranscript(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE voices SET reference_transcript = NULL WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("clear reference transcript for voice %d: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("clear reference transcript for voice %d: %w", id, err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // IsAccessibleToUser reports whether userID may use voiceID. Global cards are

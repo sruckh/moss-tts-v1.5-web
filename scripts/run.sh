@@ -52,9 +52,9 @@ ensure_network() {
 load_identity() {
   say "Loading Infisical machine identity (scripts/env.sh)"
   set +e
-  # shellcheck disable=SC1091  # path is built from $DIR; see the source= comment
-  . "$DIR/env.sh"
-  local rc=$?
+  local rc=0
+  # shellcheck disable=SC1091,SC2320  # source path is dynamic; capture its status
+  . "$DIR/env.sh" || rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
     die "Could not load the Infisical machine identity.
@@ -66,6 +66,10 @@ load_identity() {
 
 app_health() {
   "${COMPOSE[@]}" exec -T app wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null || true
+}
+
+whisper_health() {
+  "${COMPOSE[@]}" exec -T whisper-server wget -qO- http://127.0.0.1:8080/ 2>/dev/null || true
 }
 
 # Secrets land in the APP PROCESS's env, not the container's, so a fresh exec
@@ -91,21 +95,35 @@ cmd_start() {
   ensure_env_file
   ensure_network
   load_identity
-  say "Building (cached) and starting app + litestream"
-  "${COMPOSE[@]}" up -d --build
+  say "Building (cached) and starting whisper-server + app + litestream"
+  "${COMPOSE[@]}" up -d --build whisper-server app litestream
+
   say "Waiting for the app to answer /healthz"
-  local healthy=""
+  local app_ready=""
   for _ in $(seq 1 30); do
-    if [ -n "$(app_health)" ]; then healthy=1; break; fi
+    if [ -n "$(app_health)" ]; then app_ready=1; break; fi
     sleep 2
   done
-  if [ -n "$healthy" ]; then
-    printf '  /healthz: %s\n' "$(app_health)"
+  if [ -n "$app_ready" ]; then
+    printf '  app /healthz: %s\n' "$(app_health)"
   else
     warn "app /healthz not answering yet — it may still be booting; check 'logs'."
   fi
+
+  say "Waiting for whisper-server to load its model"
+  local whisper_ready=""
+  for _ in $(seq 1 60); do
+    if [ -n "$(whisper_health)" ]; then whisper_ready=1; break; fi
+    sleep 2
+  done
+  if [ -n "$whisper_ready" ]; then
+    printf '  whisper-server: ready\n'
+  else
+    warn "whisper-server did not become ready; check 'scripts/run.sh logs'."
+  fi
+
   verify_secrets || true
-  say "Started. The studio is on '$NET' behind your reverse proxy (NPM → Cloudflare)."
+  say "Started app + whisper-server + litestream on '$NET' behind your reverse proxy (NPM → Cloudflare)."
 }
 
 cmd_stop() {
@@ -114,31 +132,36 @@ cmd_stop() {
 }
 
 cmd_status() {
-  "${COMPOSE[@]}" ps
+  "${COMPOSE[@]}" ps app whisper-server litestream
   echo
   if [ -n "$(app_health)" ]; then
     say "app /healthz: OK ($(app_health))"
   else
     warn "app /healthz: not answering (is the stack running?)"
   fi
+  if [ -n "$(whisper_health)" ]; then
+    say "whisper-server: ready"
+  else
+    warn "whisper-server: not answering (is the model still loading?)"
+  fi
   verify_secrets || true
 }
 
 cmd_logs() {
-  "${COMPOSE[@]}" logs -f --tail=200
+  "${COMPOSE[@]}" logs -f --tail=200 app whisper-server litestream
 }
 
 usage() {
   cat <<'EOF'
 Usage: scripts/run.sh {start|stop|restart|status|logs}
 
-  start    Load the Infisical identity, build (cached), start the stack, and
-           verify secret injection. This is the only correct way to start the
-           stack so every key comes from Infisical.
-  stop     docker compose down  (the 'db' volume is kept)
+  start    Load the Infisical identity, build (cached), start app +
+           whisper-server + litestream, wait for app/Whisper health, and verify
+           secret injection. This is the correct way to start the full stack.
+  stop     docker compose down  (the 'db' and Whisper model volumes are kept)
   restart  stop, then start
-  status   show containers, /healthz, and whether secrets were injected
-  logs     follow app + litestream logs
+  status   show all three services, app/Whisper health, and secret injection
+  logs     follow app + whisper-server + litestream logs
 EOF
 }
 

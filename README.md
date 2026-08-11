@@ -5,7 +5,7 @@
 
 **Timbre** is a self-hosted, multi-user web front end for [MossTTS v1.5](https://github.com/sruckh/mossTTS-v1.5-runpod-serverless) running on a RunPod serverless endpoint. You apply for an account, an admin approves it, you paste a script, pick or clone a voice, queue renders, and download WAVs — your own jobs and voices only. The app owns accounts, access control, the queue, the submission, the polling, and the audio.
 
-> **Status: complete.** The whole product is built — it serves, migrates, replicates, injects secrets, gates every route behind account status, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards, global or assigned per user), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), captures the worker's optional `word_timings` forced alignment, decodes & saves completed WAV audio files, streams downloads scoped to their owner, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, spoken-line playback that tracks the word being spoken from real per-word timing, and an admin surface for accounts, access requests, and voice ownership. [What works today](#what-works-today) is exact.
+> **Status: complete.** The whole product is built — it serves, migrates, replicates, injects secrets, gates every route behind account status, ships a voice library (reference upload + the MOSS-TTS v1.5 default voice + cards, global or assigned per user), queues renders, submits out-of-band to RunPod, polls for status (decoding both output shapes the endpoint returns), captures the worker's optional `word_timings` forced alignment, decodes & saves completed WAV audio files, streams downloads scoped to their owner, and handles job deletions — all behind the full studio UI: script editor, parameter fields, voice cards you can rename and audition, a live render queue whose rows load into the player, spoken-line playback that tracks the word being spoken from real per-word timing, and an admin surface for accounts, access requests, and voice ownership. The voice library also ships a whisper.cpp sidecar that transcribes cloned-voice reference audio for Higgs TTS, an engine selector on the compose form, and lazy/eager transcription lifecycle management in the worker. [What works today](#what-works-today) is exact.
 
 ## Why it is built this way
 
@@ -13,15 +13,16 @@ Cloudflare cuts off any request at 90 seconds. A cold serverless GPU plus infere
 
 <p align="center">
   <img src="./assets/readme/architecture.svg" width="100%"
-       alt="Architecture. Browser path: browser to Cloudflare to NGINX Proxy Manager to the Timbre Go app, every hop sub-second. Render path: a background worker POSTs to RunPod's async /run endpoint and a poller reads /status/{id} until COMPLETED, then decodes audio_base64, writes a WAV and marks the job ready. State: SQLite in WAL mode replicated continuously by a Litestream sidecar to an S3-compatible bucket.">
+       alt="Architecture. Browser path: browser to Cloudflare to NGINX Proxy Manager to the Timbre Go app, every hop sub-second. Render path: a background worker POSTs to RunPod's async /run endpoint (MOSS or Higgs) and a poller reads /status/{id} until COMPLETED, then decodes audio_base64, writes a WAV and marks the job ready. For Higgs, the worker first transcribes the voice's reference audio through a private whisper-server sidecar on shared_net. State: SQLite in WAL mode replicated continuously by a Litestream sidecar to an S3-compatible bucket.">
 </p>
 
 The browser only ever talks to the Go app, in sub-second hops. A background worker submits to RunPod's async `/run` and a poller watches `/status/{id}`; when it reports `COMPLETED` the worker decodes `audio_base64`, writes the WAV and flips the job to `ready`. The UI finds out by polling the app, not RunPod. `/runsync` is unusable here for the same 90-second reason.
 
-Two consequences worth knowing before you read the code:
+Three consequences worth knowing before you read the code:
 
 - **The container publishes no ports.** It is reachable only on the `shared_net` Docker network, where NGINX Proxy Manager forwards a hostname to it and Cloudflare terminates TLS.
 - **Reference audio is sent inline, not via a URL.** The user uploads a sample (drag/drop or file picker); the worker base64-encodes it into the RunPod submission. It is never served from a public URL.
+- **A whisper.cpp sidecar transcribes cloned voices.** When the Higgs engine is selected, the worker sends the voice's reference audio to a private `whisper-server` container on `shared_net` over whisper.cpp's HTTP API (`/inference`). The sidecar receives zero secrets and publishes no host ports. MOSS-TTS v1.5 jobs skip transcription entirely and remain operational even when the sidecar is down.
 
 ## Accounts and access
 
@@ -67,8 +68,12 @@ Nobody reaches the studio without an approved account, and nobody's jobs or priv
 | ✅ Model provenance — `jobs.model` records what rendered each take (backfilled for older rows on migrate) and the player shows it as a badge | Done |
 | ✅ Palette-exhaustive test — `internal/web/palette_test.go` fails if any color outside the 10 palette hexes appears in compiled CSS or rendered HTML | Enforced in `go test` |
 | ✅ Favicon set — apple-touch-icon, PNG icons, manifest, all embedded and served under `/static/` | Done |
+| ✅ Higgs engine support — when `HIGGS_RUNPOD_ENDPOINT` is set, the compose form offers an engine selector (`MOSS-TTS v1.5` default, `bosonai/higgs-tts-3-4b`); the selected model is recorded on the job and routed to the matching RunPod endpoint | Done |
+| ✅ whisper.cpp transcription sidecar — private `whisper-server` container compiled from pinned whisper.cpp v1.7.1, model baked in, reached over `/inference` on `shared_net`, zero secrets, no host port | Done |
+| ✅ Reference transcription — the worker transcribes cloned-voice reference audio via whisper.cpp (lazy on first Higgs submission, retrying with backoff up to 3 times) and stores the transcript in `voices.reference_transcript`; the voice card shows `Ready` vs `Transcribing...` | Done |
+| ✅ MOSS bypass — MOSS-TTS v1.5 jobs never touch the sidecar and remain fully operational during whisper.cpp or Higgs outages | Done |
 
-The complete product works end to end: apply, get approved, paste a script, pick or clone a voice, render on MOSS-TTS v1.5, and download the WAV — with accounts, access control, the queue, submission, polling, alignment capture, and storage all owned by the app.
+The complete product works end to end: apply, get approved, paste a script, pick or clone a voice, render on MOSS-TTS v1.5 or Higgs TTS, and download the WAV — with accounts, access control, the queue, submission, polling, alignment capture, transcription, and storage all owned by the app.
 
 ## Quick start
 
@@ -83,7 +88,7 @@ cp .env.example .env && $EDITOR .env
 scripts/run.sh start    # sources scripts/env.sh → docker compose up -d → verifies
 ```
 
-`start` is the only correct way to bring the stack up: `scripts/env.sh` must be sourced **before** `docker compose up` so the machine identity is forwarded into the containers, where `docker/entrypoint.sh` trades it for a token and runs the app under `infisical run`. Skip that and no secrets are injected. Stop with `scripts/run.sh stop`; see `scripts/run.sh` (no args) for `restart`, `status`, `logs`.
+`start` is the only correct way to bring the stack up: it builds and starts `whisper-server`, `app`, and `litestream`, waits for both the app's `/healthz` and the whisper-server model load to answer, and then verifies secret injection. `scripts/env.sh` must be sourced **before** `docker compose up` so the machine identity is forwarded into the containers, where `docker/entrypoint.sh` trades it for a token and runs the app under `infisical run`. Skip that and no secrets are injected. Stop with `scripts/run.sh stop`; see `scripts/run.sh` (no args) for `restart`, `status`, `logs`.
 
 Or, step by step (the wrapper runs exactly this):
 
@@ -126,7 +131,8 @@ Read from the environment at startup:
 | `TIMBRE_AUDIO_DIR` | `/data/audio` | Rendered WAVs and uploaded reference samples. |
 | `TIMBRE_SECURE_COOKIES` | — | Set `true` when served behind HTTPS so session cookies carry the `Secure` flag. It is an explicit opt-in rather than inferred from a public hostname, because reference audio goes to RunPod base64-inline and the app needs no public URL of its own. |
 | `RUNPOD_ENDPOINT` | — | Your endpoint, e.g. `https://api.runpod.ai/v2/your-endpoint-id`. Server-side only; never handed to the browser. |
-| `RUNPOD_API_KEY` | — | Injected by Infisical at container start. |
+| `HIGGS_RUNPOD_ENDPOINT` | — | Optional second RunPod endpoint for Higgs TTS v3-4b, e.g. `https://api.runpod.ai/v2/your-higgs-endpoint-id`. When set, the studio shows an engine selector; Higgs jobs route here and reuse `RUNPOD_API_KEY`. Server-side only; never handed to the browser. Leave unset to run MOSS-only. |
+| `RUNPOD_API_KEY` | — | Injected by Infisical at container start. Shared by both endpoints. |
 | `ADMIN_USERNAME` | — | Seeds the first admin user on startup (only when the users table is empty). Injected by Infisical. |
 | `ADMIN_PASSWORD` | — | Password for that bootstrap admin, bcrypt-hashed at rest. Injected by Infisical. |
 | `TIMBRE_SESSION_SECRET` | — | Keys the HMAC that signs session cookies. Injected by Infisical; if unset, sessions are forgotten on restart. |
@@ -166,10 +172,10 @@ internal/config/     environment config; reports key presence, never the value
 internal/db/         driver, pragmas, schema, migrations
 internal/auth/       bcrypt, admin bootstrap, registration, live role/status lookup, SQLite-backed sessions, middleware, the access_requests store
 internal/server/     chi router, login/logout, /register + /apply (public), the approval gate, / studio, /voices + upload + rename + reference preview (owner-scoped), /queue + /jobs + player fragment + audio download & delete (owner-scoped), /admin/ (role-gated: users, access requests, voice ownership, nav badge), static assets
-internal/voices/     voice library: MOSS default-voice seed (global, single-model contract), reference upload, per-user visibility via voice_assignments + is_global, admin SetGlobal/Assign/Unassign, rename (clones only), blob storage + read-back
-internal/jobs/       jobs table: enqueue + validation (records the rendering model), claim/submit/fail state transitions, audio & word-timing metadata (`alignment_json`) & deletion, every lookup scoped to a user id
-internal/runpod/     the RunPod client — POST /run, GET /status/{id}, GET /health, output decoded as object-or-aggregate-array (incl. the optional `word_timings` forced-alignment block), permanent-vs-transient errors
-internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod
+internal/voices/     voice library: MOSS default-voice seed (global, single-model contract), reference upload, per-user visibility via voice_assignments + is_global, admin SetGlobal/Assign/Unassign, rename (clones only), blob storage + read-back, reference transcript get/set/clear
+internal/jobs/       jobs table: enqueue + validation (records the rendering model — MOSS or Higgs), claim/submit/fail state transitions, audio & word-timing metadata (`alignment_json`) & deletion, every lookup scoped to a user id
+internal/runpod/     the RunPod client — POST /run (MOSS) & POST /run (Higgs), GET /status/{id}, GET /health, output decoded as object-or-aggregate-array (incl. the optional `word_timings` forced-alignment block), permanent-vs-transient errors, payload limits (4 references / 4 MiB each / 6 MiB total, matching RunPod's worker cap)
+internal/worker/     background submission worker & status poller loops; the only callers of internal/runpod; whisper.cpp transcription client with claim leases, lazy/eager lifecycle, and MOSS bypass
 internal/web/        templ app shell + studio + login + apply + voice library + queue + playback + admin management, Tailwind theme, favicons, palette test (compiled CSS is embedded)
 docker/entrypoint.sh Infisical login, then exec the app under `infisical run`
 scripts/             env.sh (load identity), run.sh (start/stop the stack with Infisical injection), sync-generated.sh (LSP support)
@@ -186,6 +192,10 @@ scripts/             env.sh (load identity), run.sh (start/stop the stack with I
 - **Word timing is real, with a graceful fallback.** When the worker returns `word_timings` (forced alignment of the synthesized waveform against the model-normalized transcript), the poller stores it on the job as `alignment_json` and the player walks the playhead word by word from each word's `start`/`end` seconds. The block is optional — older workers, streaming renders, and failed alignments omit it — so the field is a nullable pointer that decodes to "no timing," and the player then interpolates word positions across the audio duration. The spoken line is always rendered from the model's own words, never the caller's input, because the model reflows numbers, punctuation, and pinyin before synthesis.
 - **A missing or rejected `RUNPOD_API_KEY` fails jobs; it does not hang them.** That case is classified permanent and fails on the first attempt with the reason on the row. Transient errors (429, 5xx, network) retry three times, counted in `jobs.attempts`, then fail.
 - **Streaming.** RunPod exposes `/stream/{id}`; Timbre targets the non-streaming path first — which is also the only path that carries `word_timings` (the worker omits it for streaming renders). Streaming playback is secondary.
+- **The whisper-server is compiled, not pulled.** `Dockerfile.whisper` is a multi-stage build that clones pinned whisper.cpp v1.7.1, statically links ggml/whisper (`BUILD_SHARED_LIBS=OFF`), and bakes the `ggml-base.en.bin` model (≈141 MiB) into the image. The `whisper_models` named volume auto-seeds from the image on first `docker compose up` and is mounted read-only at runtime; nothing writes to it.
+- **Transcription is lazy and lease-guarded.** A voice's reference audio is transcribed only when a Higgs job needs it and no transcript is stored yet. The worker takes an in-memory claim lease per voice, retries with backoff (5s, 15s, then give up after 3 attempts), and expires a stuck claim after 60s so a crash mid-inference doesn't strand the voice. Transcription can also be triggered eagerly when a job arrives for a voice whose transcript is blank.
+- **MOSS is load-bearing and isolated.** MOSS-TTS v1.5 is the default engine and bypasses the transcript gate entirely. The whisper-server going down, `HIGGS_RUNPOD_ENDPOINT` being unset, or Higgs being unavailable never degrades MOSS jobs — the worker skips the transcript check for any job whose model is blank or the MOSS default.
+- **Higgs payload limits match RunPod's worker cap.** The RunPod client rejects a Higgs submission before it leaves the process if a reference would exceed RunPod's own server-side limit (4 MiB per `audio_base64` field, 6 MiB total) — failing fast with a clear message rather than sending an oversized clip to be rejected by the worker. `voice` is always `"default"`, never `null`.
 
 ## License
 

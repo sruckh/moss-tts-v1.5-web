@@ -17,7 +17,7 @@ import (
 )
 
 // queueLimit is how many of a user's jobs the queue fragment shows.
-const queueLimit = 50
+const queueLimit = 10
 
 // maxNewTokensCeiling bounds the one generation parameter the form exposes. The
 // handler defaults to 4096; a larger value only buys a longer render.
@@ -139,6 +139,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	model, err := jobs.ResolveModel(r.PostFormValue("model"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	params, err := parseJobParams(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -150,6 +156,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		VoiceID:  voiceID,
 		Text:     r.PostFormValue("text"),
 		Language: r.PostFormValue("language"),
+		Model:    model,
 		Params:   params,
 	})
 	if err != nil {

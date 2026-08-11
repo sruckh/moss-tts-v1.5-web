@@ -103,6 +103,7 @@ func (s *Server) routes() {
 	// and RunPod never sees it: submission still carries the bytes base64-inline.
 	s.router.Get("/voices/{id}/reference", s.handleVoiceReference)
 	s.router.Get("/queue", s.handleQueuePage)
+	s.router.Get("/jobs/queue", s.handleQueue)
 	s.router.Get("/jobs", s.handleQueue)
 	s.router.Post("/jobs", s.handleCreateJob)
 	s.router.Get("/jobs/{id}/audio", s.handleDownloadAudio)

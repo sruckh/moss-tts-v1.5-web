@@ -260,6 +260,104 @@ func TestVoiceOwnershipAndVisibility(t *testing.T) {
 	}
 }
 
+func TestVoiceReferenceTranscriptRoundTrip(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	res, err := store.db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES ('creator', 'hash')")
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	userID, _ := res.LastInsertId()
+
+	// 1. Create a cloned voice
+	id, err := store.CreateCloned(ctx, userID, "Test Cloned Voice", ".wav", minimalWAV())
+	if err != nil {
+		t.Fatalf("CreateCloned: %v", err)
+	}
+
+	// 2. Initial Get should have NULL transcript
+	v, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get voice %d: %v", id, err)
+	}
+	if v.ReferenceTranscript.Valid {
+		t.Errorf("initial ReferenceTranscript = %q, want NULL (invalid)", v.ReferenceTranscript.V)
+	}
+
+	// 3. SetReferenceTranscript
+	const sampleText = "The quick brown fox jumps over the lazy dog."
+	if err := store.SetReferenceTranscript(ctx, id, sampleText); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+
+	// 4. Get after update should have valid non-empty transcript
+	v2, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get voice %d after transcript update: %v", id, err)
+	}
+	if !v2.ReferenceTranscript.Valid {
+		t.Fatalf("ReferenceTranscript is invalid, want valid %q", sampleText)
+	}
+	if v2.ReferenceTranscript.V != sampleText {
+		t.Errorf("ReferenceTranscript = %q, want %q", v2.ReferenceTranscript.V, sampleText)
+	}
+
+	// 5. List should also include reference transcript
+	list, err := store.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var found bool
+	for _, voice := range list {
+		if voice.ID == id {
+			found = true
+			if !voice.ReferenceTranscript.Valid || voice.ReferenceTranscript.V != sampleText {
+				t.Errorf("List Voice.ReferenceTranscript = %v, want valid %q", voice.ReferenceTranscript, sampleText)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("List did not return created voice %d", id)
+	}
+
+	// 6. ClearReferenceTranscript resets it to NULL
+	if err := store.ClearReferenceTranscript(ctx, id); err != nil {
+		t.Fatalf("ClearReferenceTranscript: %v", err)
+	}
+	v3, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get voice %d after clear: %v", id, err)
+	}
+	if v3.ReferenceTranscript.Valid {
+		t.Errorf("ReferenceTranscript after clear = %q, want NULL", v3.ReferenceTranscript.V)
+	}
+}
+
+func TestStockVoiceTranscriptIsNull(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	if err := store.SeedStock(ctx); err != nil {
+		t.Fatalf("SeedStock: %v", err)
+	}
+
+	list, err := store.List(ctx, 1)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, voice := range list {
+		if voice.Kind == "stock" {
+			if voice.ReferenceTranscript.Valid {
+				t.Errorf("Stock voice %s (%d) has valid transcript %q, want NULL", voice.Name, voice.ID, voice.ReferenceTranscript.V)
+			}
+		}
+	}
+}
+
 // minimalWAV builds a tiny but valid RIFF/WAVE file so tests exercise the real
 // upload path (extension + WAV magic bytes) without binary test fixtures.
 func minimalWAV() []byte {

@@ -15,6 +15,7 @@ package runpod
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,8 +47,9 @@ const maxErrorBody = 2 << 10
 // changing something cannot help, so the worker fails the job immediately
 // instead of spinning.
 var (
-	ErrNoEndpoint = errors.New("runpod: no endpoint configured (set RUNPOD_ENDPOINT)")
-	ErrNoAPIKey   = errors.New("runpod: no API key configured (set RUNPOD_API_KEY)")
+	ErrNoEndpoint      = errors.New("runpod: no endpoint configured (set RUNPOD_ENDPOINT)")
+	ErrNoHiggsEndpoint = errors.New("runpod: no Higgs endpoint configured (set HIGGS_RUNPOD_ENDPOINT)")
+	ErrNoAPIKey        = errors.New("runpod: no API key configured (set RUNPOD_API_KEY)")
 )
 
 // Error is a non-2xx response from RunPod.
@@ -90,9 +92,19 @@ func (e *DecodeError) Error() string {
 
 func (e *DecodeError) Unwrap() error { return e.Err }
 
+// HiggsValidationError reports a Higgs payload that the worker's own schema
+// would reject before any network call is made (too many references, a
+// reference over the decoded size limit, or a missing transcript). Always
+// permanent: retrying an oversized or malformed payload cannot succeed.
+type HiggsValidationError struct {
+	Reason string
+}
+
+func (e *HiggsValidationError) Error() string { return "runpod: " + e.Reason }
+
 // IsPermanent reports whether err is a failure that retrying cannot fix.
 func IsPermanent(err error) bool {
-	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoAPIKey) {
+	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoHiggsEndpoint) || errors.Is(err, ErrNoAPIKey) {
 		return true
 	}
 	var apiErr *Error
@@ -101,6 +113,10 @@ func IsPermanent(err error) bool {
 	}
 	var decodeErr *DecodeError
 	if errors.As(err, &decodeErr) {
+		return true
+	}
+	var valErr *HiggsValidationError
+	if errors.As(err, &valErr) {
 		return true
 	}
 	return false
@@ -154,6 +170,133 @@ func (in Input) MarshalJSON() ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// HiggsModel is the RunPod model identifier for the Higgs TTS engine
+// (bosonai/higgs-tts-3-4b), recorded verbatim in jobs.model.
+const HiggsModel = "bosonai/higgs-tts-3-4b"
+
+// Higgs worker limits (sruckh/higgs-tts-3-4b-serverless): at most 4 reference
+// clips, 4 MiB decoded audio per reference, 6 MiB decoded total. These match
+// the RunPod worker's own server-side cap on references[].audio_base64, so
+// SubmitHiggs enforces them itself to fail fast with a clear message rather
+// than sending an oversized clip to be rejected by the worker.
+const (
+	higgsMaxReferences     = 4
+	higgsMaxReferenceBytes = 4 << 20 // 4 MiB, decoded (pre-base64) — matches the RunPod worker cap
+	higgsMaxTotalBytes     = 6 << 20 // 6 MiB, decoded (pre-base64)
+)
+
+// HiggsReference is one cloned-voice reference clip attached to a Higgs
+// request. Audio is the raw decoded bytes — SubmitHiggs base64-encodes them,
+// the caller never pre-encodes.
+type HiggsReference struct {
+	Audio  []byte
+	Text   string // the clip's transcript (Voice.ReferenceTranscript); required
+	Format string // container extension without the dot: "wav", "mp3", "flac", "ogg"
+}
+
+// HiggsInput is the `input` object of a Higgs submission.
+//
+// Speed, Temperature, and TopK left at their zero value resolve to the Higgs
+// worker's own defaults (1.0, 0.8, 50) — there is no caller-meaningful use of
+// exactly 0 for any of them.
+type HiggsInput struct {
+	// Text is the script to render. Required. Sent as the engine's "input" key.
+	Text string
+
+	// Voice selects a stock Higgs voice. Empty resolves to "default": the
+	// engine authoritatively rejects a null/empty voice (ADR: voice: null is
+	// forbidden), and reference-only cloning also uses the "default" voice
+	// name alongside References.
+	Voice string
+
+	// References are the cloned voice's reference clips, at most
+	// higgsMaxReferences. SubmitHiggs validates these before ever encoding or
+	// sending them.
+	References []HiggsReference
+
+	ResponseFormat string  // default "wav"
+	Speed          float64 // default 1.0
+	Temperature    float64 // default 0.8
+	TopK           int     // default 50
+}
+
+// MarshalJSON renders the Higgs input object per ADR 002 / the Stage 05
+// adapter contract. voice is never omitted and never null.
+func (in HiggsInput) MarshalJSON() ([]byte, error) {
+	voice := strings.TrimSpace(in.Voice)
+	if voice == "" {
+		voice = "default"
+	}
+	responseFormat := in.ResponseFormat
+	if responseFormat == "" {
+		responseFormat = "wav"
+	}
+	speed := in.Speed
+	if speed == 0 {
+		speed = 1.0
+	}
+	temperature := in.Temperature
+	if temperature == 0 {
+		temperature = 0.8
+	}
+	topK := in.TopK
+	if topK == 0 {
+		topK = 50
+	}
+
+	payload := map[string]any{
+		"input":           in.Text,
+		"model":           HiggsModel,
+		"voice":           voice,
+		"response_format": responseFormat,
+		"speed":           speed,
+		"temperature":     temperature,
+		"top_k":           topK,
+		"stream":          false,
+	}
+	if len(in.References) > 0 {
+		refs := make([]map[string]any, len(in.References))
+		for i, ref := range in.References {
+			refs[i] = map[string]any{
+				"audio_base64": base64.StdEncoding.EncodeToString(ref.Audio),
+				"text":         ref.Text,
+				"audio_format": ref.Format,
+			}
+		}
+		payload["references"] = refs
+	}
+	return json.Marshal(payload)
+}
+
+// ValidateHiggsReferences enforces the Higgs worker's own reference limits
+// (higgsMaxReferences, higgsMaxReferenceBytes, higgsMaxTotalBytes) and that
+// every reference carries a transcript, before any bytes are encoded or sent.
+func ValidateHiggsReferences(refs []HiggsReference) error {
+	if len(refs) > higgsMaxReferences {
+		return &HiggsValidationError{
+			Reason: fmt.Sprintf("too many references: %d (max %d)", len(refs), higgsMaxReferences),
+		}
+	}
+	var total int
+	for i, ref := range refs {
+		if len(ref.Audio) > higgsMaxReferenceBytes {
+			return &HiggsValidationError{
+				Reason: fmt.Sprintf("reference %d is %d bytes decoded (max %d)", i, len(ref.Audio), higgsMaxReferenceBytes),
+			}
+		}
+		if strings.TrimSpace(ref.Text) == "" {
+			return &HiggsValidationError{Reason: fmt.Sprintf("reference %d has no transcript text", i)}
+		}
+		total += len(ref.Audio)
+	}
+	if total > higgsMaxTotalBytes {
+		return &HiggsValidationError{
+			Reason: fmt.Sprintf("total reference audio is %d bytes decoded (max %d)", total, higgsMaxTotalBytes),
+		}
+	}
+	return nil
+}
+
 // Submission is the response to POST /run.
 type Submission struct {
 	ID     string `json:"id"`
@@ -180,9 +323,14 @@ type Health struct {
 
 // Client talks to one serverless endpoint.
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
+	// mossEndpoint and higgsEndpoint are two separately deployed RunPod
+	// Serverless endpoints. Requests are routed to one or the other by which
+	// method is called (Submit/Status vs SubmitHiggs/StatusHiggs); both share
+	// this client's HTTP transport and bearer token.
+	mossEndpoint  string
+	higgsEndpoint string
+	apiKey        string
+	http          *http.Client
 }
 
 // Option customizes a Client.
@@ -194,15 +342,22 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) { c.http = h }
 }
 
+// WithHiggsEndpoint sets the second endpoint SubmitHiggs and StatusHiggs
+// route to (HIGGS_RUNPOD_ENDPOINT). Left unset, those calls fail with
+// ErrNoHiggsEndpoint rather than falling back to the MOSS endpoint.
+func WithHiggsEndpoint(endpoint string) Option {
+	return func(c *Client) { c.higgsEndpoint = strings.TrimRight(endpoint, "/") }
+}
+
 // New builds a client for endpoint (e.g. https://api.runpod.ai/v2/<id>) using
 // apiKey as the bearer token. Both may be empty; the resulting client fails
 // every call with ErrNoEndpoint / ErrNoAPIKey rather than panicking, so the app
 // still boots when Infisical injected nothing and queued jobs fail loudly.
 func New(endpoint, apiKey string, opts ...Option) *Client {
 	c := &Client{
-		baseURL: strings.TrimRight(endpoint, "/"),
-		apiKey:  apiKey,
-		http:    &http.Client{Timeout: defaultTimeout},
+		mossEndpoint: strings.TrimRight(endpoint, "/"),
+		apiKey:       apiKey,
+		http:         &http.Client{Timeout: defaultTimeout},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -212,7 +367,7 @@ func New(endpoint, apiKey string, opts ...Option) *Client {
 
 // Configured reports whether both the endpoint and the key are present.
 func (c *Client) Configured() bool {
-	return c.baseURL != "" && c.apiKey != ""
+	return c.mossEndpoint != "" && c.apiKey != ""
 }
 
 // Submit posts the job to /run and returns the async id RunPod assigns. It does
@@ -224,7 +379,33 @@ func (c *Client) Submit(ctx context.Context, in Input) (Submission, error) {
 	}
 
 	var out Submission
-	if err := c.do(ctx, http.MethodPost, "/run", body, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, c.mossEndpoint, "/run", body, &out); err != nil {
+		return Submission{}, err
+	}
+	if out.ID == "" {
+		return Submission{}, errors.New("runpod: /run returned no job id")
+	}
+	return out, nil
+}
+
+// SubmitHiggs posts a Higgs TTS job to /run on the Higgs endpoint and returns
+// the async id RunPod assigns. References are validated against the worker's
+// limits (ValidateHiggsReferences) before anything is sent.
+func (c *Client) SubmitHiggs(ctx context.Context, in HiggsInput) (Submission, error) {
+	if c.higgsEndpoint == "" {
+		return Submission{}, ErrNoHiggsEndpoint
+	}
+	if err := ValidateHiggsReferences(in.References); err != nil {
+		return Submission{}, err
+	}
+
+	body, err := json.Marshal(map[string]any{"input": in})
+	if err != nil {
+		return Submission{}, fmt.Errorf("runpod: encode higgs submission: %w", err)
+	}
+
+	var out Submission
+	if err := c.do(ctx, http.MethodPost, c.higgsEndpoint, "/run", body, &out); err != nil {
 		return Submission{}, err
 	}
 	if out.ID == "" {
@@ -236,7 +417,7 @@ func (c *Client) Submit(ctx context.Context, in Input) (Submission, error) {
 // Health probes the endpoint's worker pool and queue depth.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var out Health
-	if err := c.do(ctx, http.MethodGet, "/health", nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, c.mossEndpoint, "/health", nil, &out); err != nil {
 		return Health{}, err
 	}
 	return out, nil
@@ -352,15 +533,32 @@ func (c *Client) Status(ctx context.Context, id string) (StatusResult, error) {
 		return StatusResult{}, errors.New("runpod: empty job id")
 	}
 	var out StatusResult
-	if err := c.do(ctx, http.MethodGet, "/status/"+id, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, c.mossEndpoint, "/status/"+id, nil, &out); err != nil {
+		return StatusResult{}, err
+	}
+	return out, nil
+}
+
+// StatusHiggs queries GET /status/{id} on the Higgs endpoint. Mirrors Status,
+// which stays pinned to the MOSS endpoint — a job's engine determines which
+// method the caller uses to poll it.
+func (c *Client) StatusHiggs(ctx context.Context, id string) (StatusResult, error) {
+	if id == "" {
+		return StatusResult{}, errors.New("runpod: empty job id")
+	}
+	if c.higgsEndpoint == "" {
+		return StatusResult{}, ErrNoHiggsEndpoint
+	}
+	var out StatusResult
+	if err := c.do(ctx, http.MethodGet, c.higgsEndpoint, "/status/"+id, nil, &out); err != nil {
 		return StatusResult{}, err
 	}
 	return out, nil
 }
 
 // do issues one request and decodes a JSON response into out.
-func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
-	if c.baseURL == "" {
+func (c *Client) do(ctx context.Context, method, baseURL, path string, body []byte, out any) error {
+	if baseURL == "" {
 		return ErrNoEndpoint
 	}
 	if c.apiKey == "" {
@@ -371,7 +569,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
 	if err != nil {
 		return fmt.Errorf("runpod: build %s %s: %w", method, path, err)
 	}

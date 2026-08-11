@@ -63,6 +63,10 @@ func (m *mockStatusClient) Status(ctx context.Context, id string) (runpod.Status
 	return m.fn(ctx, id)
 }
 
+func (m *mockStatusClient) StatusHiggs(ctx context.Context, id string) (runpod.StatusResult, error) {
+	return m.fn(ctx, id)
+}
+
 func TestPollerCompletesJobAndSavesAudioFile(t *testing.T) {
 	tempDir := t.TempDir()
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -258,5 +262,57 @@ func TestPollerThreadsWordTimings(t *testing.T) {
 	}
 	if got := store2.alignment[78]; got != "" {
 		t.Errorf("alignment[78] = %q, want empty when word_timings is absent", got)
+	}
+}
+
+// routingStatusClient records which status method was called so a test can
+// assert the poller routes by engine model.
+type routingStatusClient struct {
+	statusCalls      int
+	statusHiggsCalls int
+	result           runpod.StatusResult
+	err              error
+}
+
+func (r *routingStatusClient) Status(context.Context, string) (runpod.StatusResult, error) {
+	r.statusCalls++
+	return r.result, r.err
+}
+
+func (r *routingStatusClient) StatusHiggs(context.Context, string) (runpod.StatusResult, error) {
+	r.statusHiggsCalls++
+	return r.result, r.err
+}
+
+// TestPollerRoutesByEngineModel asserts a Higgs job is polled through
+// StatusHiggs and a MOSS job through Status.
+func TestPollerRoutesByEngineModel(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	cases := []struct {
+		name      string
+		model     string
+		wantMoss  int
+		wantHiggs int
+	}{
+		{"moss", jobs.DefaultModel, 1, 0},
+		{"blank defaults to moss", "", 1, 0},
+		{"higgs", jobs.HiggsModel, 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job := jobs.Job{ID: 7, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-7", Model: tc.model}
+			store := newMockPollerStore(job)
+			client := &routingStatusClient{result: runpod.StatusResult{ID: "rp-7", Status: runpod.StatusInQueue}}
+
+			NewPoller(store, client, t.TempDir(), log, WithPollerInterval(10)).Tick(context.Background())
+
+			if client.statusCalls != tc.wantMoss {
+				t.Errorf("Status calls = %d, want %d", client.statusCalls, tc.wantMoss)
+			}
+			if client.statusHiggsCalls != tc.wantHiggs {
+				t.Errorf("StatusHiggs calls = %d, want %d", client.statusHiggsCalls, tc.wantHiggs)
+			}
+		})
 	}
 }

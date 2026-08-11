@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,11 @@ import (
 
 // harness is a worker wired to a real database and voice store, so the tests
 // exercise the actual state transitions rather than a mock's idea of them.
+// higgsModel stands in for a non-MOSS model. Goal 03 wires the real Higgs
+// RunPod adapter; this goal only needs "some model that is not MOSS-TTS v1.5"
+// to exercise the transcript gate.
+const higgsModel = "bosonai/higgs-tts-3-4b"
+
 type harness struct {
 	jobs    *jobs.Store
 	voices  *voices.Store
@@ -94,6 +100,21 @@ func (h *harness) enqueue(t *testing.T, voiceID int64, text string) int64 {
 	return id
 }
 
+func (h *harness) enqueueModel(t *testing.T, voiceID int64, text, model string) int64 {
+	t.Helper()
+
+	id, err := h.jobs.Enqueue(context.Background(), jobs.NewJob{
+		UserID:  h.userID,
+		VoiceID: voiceID,
+		Text:    text,
+		Model:   model,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	return id
+}
+
 func (h *harness) get(t *testing.T, id int64) jobs.Job {
 	t.Helper()
 
@@ -112,12 +133,13 @@ func (h *harness) worker(client Submitter, maxInFlight int, opts ...Option) *Wor
 // fakeSubmitter counts calls and records the payloads it was handed. The call
 // count is what proves a job is never submitted twice.
 type fakeSubmitter struct {
-	mu     sync.Mutex
-	calls  int
-	inputs []runpod.Input
-	id     string
-	status string
-	err    error
+	mu          sync.Mutex
+	calls       int
+	inputs      []runpod.Input
+	higgsInputs []runpod.HiggsInput
+	id          string
+	status      string
+	err         error
 }
 
 func (f *fakeSubmitter) Submit(_ context.Context, in runpod.Input) (runpod.Submission, error) {
@@ -143,7 +165,58 @@ func (f *fakeSubmitter) Submit(_ context.Context, in runpod.Input) (runpod.Submi
 	return runpod.Submission{ID: id, Status: status}, nil
 }
 
+func (f *fakeSubmitter) SubmitHiggs(_ context.Context, in runpod.HiggsInput) (runpod.Submission, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	f.higgsInputs = append(f.higgsInputs, in)
+	if f.err != nil {
+		return runpod.Submission{}, f.err
+	}
+	id := f.id
+	if id == "" {
+		id = fmt.Sprintf("runpod-%d", f.calls)
+	}
+	status := f.status
+	if status == "" {
+		status = runpod.StatusInQueue
+	}
+	return runpod.Submission{ID: id, Status: status}, nil
+}
+
 func (f *fakeSubmitter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *fakeSubmitter) higgsCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.higgsInputs)
+}
+
+// fakeWhisper stands in for whisper-server. err simulates a sidecar outage or
+// a rejected clip; text simulates a successful transcription.
+type fakeWhisper struct {
+	mu    sync.Mutex
+	calls int
+	text  string
+	err   error
+}
+
+func (f *fakeWhisper) Transcribe(_ context.Context, _ []byte, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.text, nil
+}
+
+func (f *fakeWhisper) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
@@ -166,6 +239,63 @@ func TestTickSubmitsQueuedJob(t *testing.T) {
 	}
 	if client.callCount() != 1 {
 		t.Errorf("submit calls = %d, want 1", client.callCount())
+	}
+}
+
+// TestSubmitRoutesHiggsJobToHiggsEndpoint asserts the worker submits a Higgs
+// job through SubmitHiggs (the Higgs endpoint) and never touches the MOSS
+// Submit path. The clone carries a stored transcript so the transcript gate
+// passes and buildHiggsInput can attach the reference.
+func TestSubmitRoutesHiggsJobToHiggsEndpoint(t *testing.T) {
+	h := newHarness(t)
+	if err := h.voices.SetReferenceTranscript(context.Background(), h.cloneID, "hello world"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	id := h.enqueueModel(t, h.cloneID, "hello", jobs.HiggsModel)
+	client := &fakeSubmitter{id: "higgs-1"}
+
+	h.worker(client, 2).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Errorf("Status = %q, want %s", got.Status, jobs.StatusSubmitted)
+	}
+	if got.RunPodID != "higgs-1" {
+		t.Errorf("RunPodID = %q, want higgs-1", got.RunPodID)
+	}
+	if client.higgsCallCount() != 1 {
+		t.Errorf("SubmitHiggs calls = %d, want 1", client.higgsCallCount())
+	}
+	if client.callCount() != 1 {
+		t.Errorf("total submit calls = %d, want 1", client.callCount())
+	}
+	if got := client.higgsInputs[0]; got.Text != "hello" {
+		t.Errorf("higgs input text = %q, want %q", got.Text, "hello")
+	}
+	if len(client.higgsInputs[0].References) != 1 {
+		t.Errorf("higgs references = %d, want 1", len(client.higgsInputs[0].References))
+	}
+}
+
+// TestSubmitRoutesMOSSJobToMossEndpoint asserts a default-model job still goes
+// through Submit (the MOSS endpoint), confirming the branch does not regress
+// the existing path.
+func TestSubmitRoutesMOSSJobToMossEndpoint(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueue(t, h.stockID, "hello")
+	client := &fakeSubmitter{id: "moss-1"}
+
+	h.worker(client, 2).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.RunPodID != "moss-1" {
+		t.Errorf("RunPodID = %q, want moss-1", got.RunPodID)
+	}
+	if client.higgsCallCount() != 0 {
+		t.Errorf("SubmitHiggs calls = %d, want 0 for a MOSS job", client.higgsCallCount())
+	}
+	if client.callCount() != 1 {
+		t.Errorf("Submit calls = %d, want 1", client.callCount())
 	}
 }
 
@@ -409,4 +539,272 @@ func waitForStatus(t *testing.T, h *harness, id int64, want string) <-chan struc
 		t.Errorf("job %d never reached status %q", id, want)
 	}()
 	return done
+}
+
+// Criterion 4 of Goal 02: MOSS-TTS v1.5 jobs must remain 100% operational
+// during a total whisper-server outage.
+func TestMOSSJobBypassesWhisperOutage(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueue(t, h.cloneID, "hello") // default model -> MOSS-TTS v1.5
+
+	client := &fakeSubmitter{id: "runpod-moss"}
+	whisper := &fakeWhisper{err: errors.New("whisper-server unreachable")}
+	w := h.worker(client, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("Status = %q, want %s (err=%q)", got.Status, jobs.StatusSubmitted, got.Error)
+	}
+	if whisper.callCount() != 0 {
+		t.Errorf("whisper calls = %d, want 0 — MOSS jobs must never touch whisper-server", whisper.callCount())
+	}
+}
+
+// Criterion 3: a Higgs job on a cloned voice with no stored transcript
+// triggers one atomic lazy-recovery attempt and then submits.
+func TestHiggsJobLazyRecoverySucceeds(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueueModel(t, h.cloneID, "hello", higgsModel)
+
+	client := &fakeSubmitter{id: "runpod-higgs"}
+	whisper := &fakeWhisper{text: "  This is the reference transcript.  "}
+	w := h.worker(client, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("Status = %q, want %s (err=%q)", got.Status, jobs.StatusSubmitted, got.Error)
+	}
+	if whisper.callCount() != 1 {
+		t.Errorf("whisper calls = %d, want 1", whisper.callCount())
+	}
+
+	voice, err := h.voices.Get(context.Background(), h.cloneID)
+	if err != nil {
+		t.Fatalf("Get voice: %v", err)
+	}
+	if !voice.ReferenceTranscript.Valid || voice.ReferenceTranscript.V != "This is the reference transcript." {
+		t.Errorf("ReferenceTranscript = %+v, want the trimmed whisper text", voice.ReferenceTranscript)
+	}
+}
+
+// A failed lazy recovery must fail the job outright rather than spend a
+// RunPod credit on a job Higgs cannot clone the voice for.
+func TestHiggsJobLazyRecoveryFailureFailsJobWithoutSubmitting(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueueModel(t, h.cloneID, "hello", higgsModel)
+
+	client := &fakeSubmitter{}
+	whisper := &fakeWhisper{err: errors.New("whisper-server: connection refused")}
+	w := h.worker(client, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusFailed {
+		t.Fatalf("Status = %q, want %s", got.Status, jobs.StatusFailed)
+	}
+	if got.Error == "" {
+		t.Error("failed job recorded no error")
+	}
+	if got.RunPodID != "" {
+		t.Errorf("RunPodID = %q, want empty — a failed transcription must not reach RunPod", got.RunPodID)
+	}
+	if client.callCount() != 0 {
+		t.Errorf("submit calls = %d, want 0", client.callCount())
+	}
+}
+
+// Empty/whitespace-only speech is a distinct, non-retryable failure reason.
+func TestHiggsJobEmptySpeechFailsJob(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueueModel(t, h.cloneID, "hello", higgsModel)
+
+	whisper := &fakeWhisper{text: "   "}
+	w := h.worker(&fakeSubmitter{}, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusFailed {
+		t.Fatalf("Status = %q, want %s", got.Status, jobs.StatusFailed)
+	}
+	if !strings.Contains(got.Error, "no speech detected") {
+		t.Errorf("Error = %q, want it to mention no speech detected", got.Error)
+	}
+}
+
+// A transcript already on file (e.g. a manual correction) must never be
+// silently re-transcribed.
+func TestHiggsJobSkipsWhisperWhenTranscriptAlreadySet(t *testing.T) {
+	h := newHarness(t)
+	if err := h.voices.SetReferenceTranscript(context.Background(), h.cloneID, "Already corrected."); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	id := h.enqueueModel(t, h.cloneID, "hello", higgsModel)
+
+	whisper := &fakeWhisper{err: errors.New("must not be called")}
+	w := h.worker(&fakeSubmitter{id: "runpod-x"}, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("Status = %q, want %s (err=%q)", got.Status, jobs.StatusSubmitted, got.Error)
+	}
+	if whisper.callCount() != 0 {
+		t.Errorf("whisper calls = %d, want 0 — an existing transcript must not be re-transcribed", whisper.callCount())
+	}
+}
+
+// A Higgs job against a stock voice carries no reference audio, so there is
+// nothing to transcribe.
+func TestHiggsJobStockVoiceSkipsTranscriptCheck(t *testing.T) {
+	h := newHarness(t)
+	id := h.enqueueModel(t, h.stockID, "hello", higgsModel)
+
+	whisper := &fakeWhisper{err: errors.New("must not be called")}
+	w := h.worker(&fakeSubmitter{id: "runpod-stock"}, 2, WithWhisperClient(whisper))
+	w.Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("Status = %q, want %s (err=%q)", got.Status, jobs.StatusSubmitted, got.Error)
+	}
+	if whisper.callCount() != 0 {
+		t.Errorf("whisper calls = %d, want 0", whisper.callCount())
+	}
+}
+
+// Criterion 2: exponential backoff (5s, then 15s) gates each retry, and the
+// third attempt spends the WhisperMaxAttempts budget.
+func TestTranscriptionClaimBacksOffBetweenAttempts(t *testing.T) {
+	h := newHarness(t)
+	w := h.worker(&fakeSubmitter{}, 1)
+	const voiceID = int64(42)
+
+	if !w.claimTranscription(voiceID) {
+		t.Fatal("attempt 1: want claim to succeed immediately")
+	}
+	if w.claimTranscription(voiceID) {
+		t.Fatal("immediate re-claim: want it blocked by the 5s backoff")
+	}
+
+	w.leaseMu.Lock()
+	w.leases[voiceID].claimedAt = time.Now().Add(-5 * time.Second)
+	w.leaseMu.Unlock()
+	if !w.claimTranscription(voiceID) {
+		t.Fatal("attempt 2: want claim to succeed once the 5s backoff has elapsed")
+	}
+	if w.claimTranscription(voiceID) {
+		t.Fatal("immediate re-claim after attempt 2: want it blocked by the 15s backoff")
+	}
+
+	w.leaseMu.Lock()
+	w.leases[voiceID].claimedAt = time.Now().Add(-15 * time.Second)
+	w.leaseMu.Unlock()
+	if !w.claimTranscription(voiceID) {
+		t.Fatal("attempt 3: want claim to succeed once the 15s backoff has elapsed")
+	}
+
+	if w.claimTranscription(voiceID) {
+		t.Fatal("attempt 4: want claim refused — WhisperMaxAttempts is exhausted")
+	}
+}
+
+// Criterion 2: a claim older than WhisperClaimExpiry (60s) is recoverable
+// even if its attempt budget was already spent — the previous holder crashed
+// or stalled without releasing it.
+func TestTranscriptionStaleClaimRecovery(t *testing.T) {
+	h := newHarness(t)
+	w := h.worker(&fakeSubmitter{}, 1)
+	const voiceID = int64(7)
+
+	w.leaseMu.Lock()
+	w.leases[voiceID] = &transcriptionLease{
+		claimedAt: time.Now().Add(-90 * time.Second),
+		attempts:  WhisperMaxAttempts,
+	}
+	w.leaseMu.Unlock()
+
+	if !w.claimTranscription(voiceID) {
+		t.Fatal("want a claim older than WhisperClaimExpiry to be recoverable")
+	}
+
+	w.leaseMu.Lock()
+	got := w.leases[voiceID].attempts
+	w.leaseMu.Unlock()
+	if got != 1 {
+		t.Errorf("attempts after stale-claim recovery = %d, want 1 (reset, then re-claimed)", got)
+	}
+}
+
+// Criterion 2: the 30s (here, shortened) HTTP context timeout must cancel a
+// stalled whisper-server request rather than hang the worker.
+func TestHTTPWhisperClientEnforcesTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"text":"too late"}`)
+	}))
+	defer server.Close()
+
+	client := newHTTPWhisperClient(server.URL, 20*time.Millisecond)
+	if _, err := client.Transcribe(context.Background(), []byte("audio"), "wav"); err == nil {
+		t.Fatal("want a timeout error, got nil")
+	}
+}
+
+// Criterion 1/2: verifies the exact wire contract from ADR 002 — multipart
+// POST /inference with response_format=json and temperature=0.0.
+func TestHTTPWhisperClientPostsMultipartInference(t *testing.T) {
+	var gotPath, gotMethod, gotFilename, gotResponseFormat, gotTemperature string
+	var gotFile []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotFile, _ = io.ReadAll(file)
+		gotFilename = header.Filename
+		gotResponseFormat = r.FormValue("response_format")
+		gotTemperature = r.FormValue("temperature")
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"text":" hello world "}`)
+	}))
+	defer server.Close()
+
+	client := newHTTPWhisperClient(server.URL, WhisperTimeout)
+	text, err := client.Transcribe(context.Background(), []byte("PCM-BYTES"), "wav")
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if text != "hello world" {
+		t.Errorf("text = %q, want trimmed %q", text, "hello world")
+	}
+	if gotMethod != http.MethodPost || gotPath != "/inference" {
+		t.Errorf("request = %s %s, want POST /inference", gotMethod, gotPath)
+	}
+	if string(gotFile) != "PCM-BYTES" {
+		t.Errorf("uploaded file bytes = %q, want PCM-BYTES", gotFile)
+	}
+	if gotFilename != "reference.wav" {
+		t.Errorf("filename = %q, want reference.wav", gotFilename)
+	}
+	if gotResponseFormat != "json" || gotTemperature != "0.0" {
+		t.Errorf("response_format=%q temperature=%q, want json/0.0", gotResponseFormat, gotTemperature)
+	}
+}
+
+// The default sidecar URL must match the docker-compose service name — the
+// worker has no env var to configure it (see docker-compose.yml).
+func TestDefaultWhisperURLMatchesSidecarServiceName(t *testing.T) {
+	if DefaultWhisperURL != "http://whisper-server:8080" {
+		t.Errorf("DefaultWhisperURL = %q, want http://whisper-server:8080", DefaultWhisperURL)
+	}
 }

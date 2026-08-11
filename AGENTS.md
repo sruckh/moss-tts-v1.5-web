@@ -13,6 +13,9 @@ The plan of record lives in the Outline brain under project
 `moss-tts-v1.5-web` — start there. `.goals/` holds the phase-by-phase goal
 prompts and the brief/recon they are grounded in, but it is local working
 material and is **not** in the published repo, so do not assume it is present.
+`.icm/higgs-tts-whisper/` is the local, planning-only ICM pipeline for Higgs
+reference transcription and post-render word alignment; stage outputs are
+human-reviewed handoffs, and stage edits require ICM `sync` then `audit`.
 `DESIGN.md` and `index.html` are the design system — `index.html` is the living
 reference, rendered in itself.
 
@@ -26,6 +29,13 @@ reference, rendered in itself.
 - **No published ports.** The app is reachable only on the external
   `shared_net` network, where NGINX Proxy Manager forwards a public hostname to
   it and Cloudflare terminates TLS. Never add a `ports:` mapping.
+- **Whisper is a private, secret-free sidecar.** `whisper-server` builds from
+  `Dockerfile.whisper`, joins only `shared_net`, publishes no host port and
+  receives no RunPod, Infisical, auth/session or S3 credentials. The pinned
+  whisper.cpp v1.7.1 server has no `/health` route; its Docker healthcheck probes
+  `GET /`, while transcription uses `POST /inference`. Stopping only the sidecar
+  is the rollback fallback: MOSS jobs and the app UI stay available; restore it
+  with `docker compose up -d --no-deps whisper-server` and wait for `healthy`.
 - **Reference audio is delivered to RunPod as base64 inline, not a public URL.**
   Uploaded samples are stored as blobs and base64-encoded into the RunPod
   submission payload by the worker (confirmed working from testing). There is no
@@ -41,10 +51,10 @@ reference, rendered in itself.
 - **The voice library lives in `internal/voices`.** `internal/voices.Store` owns
   the `voices` table and the reference-audio blobs on the `TIMBRE_AUDIO_DIR`
   volume (`refs/<rand>.<ext>`). On startup it seeds one stock voice —
-  **Moss, the MOSS-TTS v1.5 default voice** (no reference audio; the endpoint
-  renders its built-in voice) — and reconciles away any stale stock rows. The
-  endpoint has exactly one model, so voice identity beyond the default comes
-  only from cloned references.
+  **Moss, the MOSS-TTS v1.5 default voice** (no reference audio; the MOSS
+  endpoint renders its built-in voice) — and reconciles away any stale stock
+  rows. MOSS-TTS v1.5 remains the default engine; the studio also exposes
+  `bosonai/higgs-tts-3-4b`, whose voice identity comes from cloned references.
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
   extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row,
@@ -55,8 +65,12 @@ reference, rendered in itself.
   the next boot and be deleted, taking every job's voice link with it
   (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead. All
   routes are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
-  `Store.ReferenceBytes` reads the blob back for Goals 4–5's inline base64
-  submission.
+  `Store.ReferenceBytes` reads the blob back for inline base64 submission.
+  Cloned cards report transcription readiness from `ReferenceTranscript`:
+  non-blank stored text is **Ready**, otherwise **Transcribing...**. Upload and
+  enqueue responses never wait for Whisper; the background worker owns eager and
+  atomic lazy recovery before a Higgs job reaches RunPod. MOSS jobs bypass this
+  transcript gate entirely.
 - **No request blocks longer than ~90s** (Cloudflare's cap). The browser talks
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.
@@ -143,11 +157,14 @@ reference, rendered in itself.
   (masthead spectrum, compose card with script editor + parameter fields,
   voice library, live queue table, playback "spoken line") inside the
   `AppShell` rail in `layout.templ`; `/voices` and `/queue` are the same
-  components standalone. The queue fragment (`id="queue"`) polls
-  `GET /jobs` every 2s via HTMX; `POST /jobs` accepts the studio's parameter
-  fields (`seed`, `pace`, `pitch`, `expressiveness`, `normalize`,
-  `output_48k`, plus `max_new_tokens`) into `params_json`, validated 400 on
-  bad values. The queue's Length column and the player derive audio duration
+  components standalone. The queue fragment (`id="queue"`, `aria-live="polite"`)
+  polls dedicated `GET /jobs/queue` every 2s via HTMX; compatibility `GET /jobs`
+  still returns the same fragment. `POST /jobs` accepts the engine plus the
+  studio's parameter fields (`seed`, `pace`, `pitch`, `expressiveness`,
+  `normalize`, `output_48k`, plus `max_new_tokens`) into `jobs.model` and
+  `params_json`, validated 400 on bad values. Blank engine selections default to
+  MOSS and unknown engines are rejected. The server returns at most ten rows;
+  this is the strict queue cap, not merely a visual crop. The queue's Length column and the player derive audio duration
   from the saved WAV's byte size (`audioDurations` in
   `internal/server/jobs.go`).
   **The queue table fits the viewport — never re-introduce a horizontal
@@ -168,8 +185,10 @@ reference, rendered in itself.
   this with `hx-on` scroll-preservation handlers — under HTMX v4 the after-swap
   handler's `this` is the detached pre-swap element, so they silently no-op.
   **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
-  backfilled by `db.Migrate` for older rows). The player's model badge reads that
-  column — never a literal in a template. The frontend is templ + HTMX v4 (ESM from
+  backfilled by `db.Migrate` for older rows). Queue rows and the player both read
+  their model badges from that column — never from a presentation-only literal.
+  Browser/API selection is limited to `jobs.DefaultModel` and `jobs.HiggsModel`;
+  the store remains able to preserve explicit historical attribution. The frontend is templ + HTMX v4 (ESM from
   jsdelivr) + Alpine 3 + Tailwind v4; component CSS (badges, buttons, range,
   toggle, spoken line, alerts, empty states) lives in
   `internal/web/input.css`, copied to fidelity from `index.html`.
@@ -186,11 +205,13 @@ docker compose run --rm test go test ./...
 ```
 
 `scripts/run.sh` wraps the start/stop flow and the env.sh-then-up ordering that
-secret injection depends on: `scripts/run.sh start` sources `env.sh`, runs
-`docker compose up -d --build`, waits on `/healthz`, and verifies
-`RUNPOD_API_KEY` landed in the app process; `stop` / `restart` / `status` /
-`logs` do what they say. It is the operator-facing one command; the raw
-`docker compose` invocations above remain the source of truth.
+secret injection depends on: `scripts/run.sh start` sources `env.sh`, explicitly
+starts `whisper-server`, `app` and `litestream`, waits for app `/healthz` and the
+Whisper model-serving root, and verifies `RUNPOD_API_KEY` landed in the app
+process. `status` reports all three services and both health probes; `logs`
+follows all three. `stop` / `restart` do what they say. It is the operator-facing
+one command; the raw `docker compose` invocations above remain the source of
+truth.
 
 `scripts/env.sh` loads the machine-identity credentials from a config directory
 **outside this repo** (`~/.config/timbre/` by default; override with

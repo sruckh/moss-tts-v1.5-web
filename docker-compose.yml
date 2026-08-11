@@ -47,6 +47,42 @@ services:
       INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET:-}
     volumes:
       - db:/data
+    depends_on:
+      whisper-server:
+        condition: service_started
+
+  # Private sidecar: transcribes cached voice reference audio for Higgs TTS
+  # over whisper.cpp's HTTP API. Deliberately has no `ports:` — reachable only
+  # from `app` on shared_net — and receives zero secrets (no Infisical, no
+  # RUNPOD_API_KEY). See ADR 002 and the Stage 06 operations plan:
+  #   .icm/higgs-tts-whisper/stages/02-whisper-architecture/output/adr-whisper-runtime.md
+  #   .icm/higgs-tts-whisper/stages/06-container-operations/output/container-and-operations-plan.md
+  whisper-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    image: timbre-whisper:latest
+    container_name: timbre-whisper
+    restart: unless-stopped
+    networks:
+      - shared_net
+    volumes:
+      - whisper_models:/models:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.00'
+          memory: 1024M
+        reservations:
+          cpus: '0.50'
+          memory: 256M
+    stop_grace_period: 15s
 
   # Sidecar: replicates /data/timbre.db to Backblaze B2 by following its WAL.
   # Runs under the same Infisical entrypoint as the app — the S3 credentials in
@@ -89,3 +125,7 @@ networks:
 
 volumes:
   db:
+  # Seeded from the Dockerfile.whisper image on first mount (Docker copies the
+  # image's /models content into an empty named volume). Mounted read-only by
+  # whisper-server; nothing ever writes to it at runtime.
+  whisper_models:

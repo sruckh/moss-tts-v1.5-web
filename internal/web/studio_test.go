@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 
@@ -126,12 +127,12 @@ func TestQueueMarksSelectedRow(t *testing.T) {
 // sustains itself across a table that is replaced every two seconds.
 func TestQueuePollCarriesSelectedTake(t *testing.T) {
 	selected := render(t, Queue(sampleJobs(), 0, nil, 9))
-	if !strings.Contains(selected, `hx-get="/jobs?take=9"`) {
+	if !strings.Contains(selected, `hx-get="/jobs/queue?take=9"`) {
 		t.Error("the queue poll does not ask for the selected take")
 	}
 
 	none := render(t, Queue(sampleJobs(), 0, nil, 0))
-	if !strings.Contains(none, `hx-get="/jobs"`) {
+	if !strings.Contains(none, `hx-get="/jobs/queue"`) {
 		t.Error("the unselected queue should poll the plain URL")
 	}
 	if strings.Contains(none, "is-selected") {
@@ -194,6 +195,42 @@ func TestComposeHasClearScriptControl(t *testing.T) {
 	}
 }
 
+func TestComposeEngineSelector(t *testing.T) {
+	html := render(t, Compose(sampleVoices(), 1))
+
+	for _, want := range []string{
+		`name="model"`,
+		`aria-label="Speech engine"`,
+		`focus:ring-2`,
+		`value="MOSS-TTS v1.5" selected`,
+		`value="bosonai/higgs-tts-3-4b"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("engine selector missing %q", want)
+		}
+	}
+}
+
+func TestQueueAnnouncesUpdatesAndShowsModel(t *testing.T) {
+	items := sampleJobs()
+	items[0].Model = jobs.HiggsModel
+	html := render(t, Queue(items, 0, nil, 0))
+
+	for _, want := range []string{
+		`hx-get="/jobs/queue"`,
+		`aria-live="polite"`,
+		`badge--info`,
+		jobs.HiggsModel,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("queue missing %q", want)
+		}
+	}
+	if strings.Contains(html, "<audio") {
+		t.Error("announced queue fragment contains player audio")
+	}
+}
+
 // A cloned voice card can be renamed and previewed; a stock card offers
 // neither, because Rename refuses stock voices and they have no reference.
 func TestVoiceCardControls(t *testing.T) {
@@ -217,6 +254,26 @@ func TestVoiceCardControls(t *testing.T) {
 	// A card holds buttons now, so it may not be one itself.
 	if strings.Contains(html, `<button type="button" aria-pressed=`) {
 		t.Error("the voice card is still a button and now nests buttons")
+	}
+}
+
+func TestVoiceCardTranscriptionReadiness(t *testing.T) {
+	items := []voices.Voice{
+		{ID: 1, Kind: voices.KindStock, Name: "Moss", Model: jobs.DefaultModel, LicenseLabel: "OpenMOSS Community"},
+		{ID: 2, Kind: voices.KindCloned, Name: "Missing", ReferenceTranscript: sql.Null[string]{}},
+		{ID: 3, Kind: voices.KindCloned, Name: "Blank", ReferenceTranscript: sql.Null[string]{V: "  ", Valid: true}},
+		{ID: 4, Kind: voices.KindCloned, Name: "Ready", ReferenceTranscript: sql.Null[string]{V: "Reference words.", Valid: true}},
+	}
+	html := render(t, VoiceGrid(items, 2))
+
+	if got := strings.Count(html, "Transcribing..."); got != 2 {
+		t.Errorf("Transcribing badge count = %d, want 2", got)
+	}
+	if got := strings.Count(html, ">Ready</span>"); got != 1 {
+		t.Errorf("Ready transcription badge count = %d, want 1", got)
+	}
+	if !strings.Contains(html, "focus:ring-2") {
+		t.Error("voice cards lost their keyboard focus ring")
 	}
 }
 
