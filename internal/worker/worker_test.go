@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -806,5 +807,125 @@ func TestHTTPWhisperClientPostsMultipartInference(t *testing.T) {
 func TestDefaultWhisperURLMatchesSidecarServiceName(t *testing.T) {
 	if DefaultWhisperURL != "http://whisper-server:8080" {
 		t.Errorf("DefaultWhisperURL = %q, want http://whisper-server:8080", DefaultWhisperURL)
+	}
+}
+
+func TestHTTPWhisperClientAlignsVerboseJSON(t *testing.T) {
+	var gotPath, gotMethod, gotFilename, gotResponseFormat, gotTokenTimestamps, gotTemperature string
+	var gotFile []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotFile, _ = io.ReadAll(file)
+		gotFilename = header.Filename
+		gotResponseFormat = r.FormValue("response_format")
+		gotTokenTimestamps = r.FormValue("token_timestamps")
+		gotTemperature = r.FormValue("temperature")
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"segments": [
+				{
+					"words": [
+						{"word": " Hello ", "start": 0.1, "end": 0.5},
+						{"word": "world ", "start": 0.5, "end": 1.2}
+					]
+				}
+			]
+		}`)
+	}))
+	defer server.Close()
+
+	client := NewHTTPWhisperClient(server.URL, WhisperTimeout)
+	wt, err := client.AlignOutput(context.Background(), []byte("PCM-WAV-BYTES"))
+	if err != nil {
+		t.Fatalf("AlignOutput: %v", err)
+	}
+	if wt == nil {
+		t.Fatal("wt is nil, want non-nil WordTimings")
+	}
+	if wt.Source != "whisper_cpp" {
+		t.Errorf("Source = %q, want whisper_cpp", wt.Source)
+	}
+	if len(wt.Words) != 2 {
+		t.Fatalf("len(Words) = %d, want 2", len(wt.Words))
+	}
+	if wt.Words[0].W != "Hello" || wt.Words[0].Start != 0.1 || wt.Words[0].End != 0.5 {
+		t.Errorf("Words[0] = %+v, want Hello [0.1, 0.5]", wt.Words[0])
+	}
+	if wt.Words[1].W != "world" || wt.Words[1].Start != 0.5 || wt.Words[1].End != 1.2 {
+		t.Errorf("Words[1] = %+v, want world [0.5, 1.2]", wt.Words[1])
+	}
+
+	if gotMethod != http.MethodPost || gotPath != "/inference" {
+		t.Errorf("request = %s %s, want POST /inference", gotMethod, gotPath)
+	}
+	if string(gotFile) != "PCM-WAV-BYTES" {
+		t.Errorf("uploaded file bytes = %q, want PCM-WAV-BYTES", gotFile)
+	}
+	if gotFilename != "output.wav" {
+		t.Errorf("filename = %q, want output.wav", gotFilename)
+	}
+	if gotResponseFormat != "verbose_json" || gotTokenTimestamps != "true" || gotTemperature != "0.0" {
+		t.Errorf("params = format:%q timestamps:%q temp:%q, want verbose_json/true/0.0", gotResponseFormat, gotTokenTimestamps, gotTemperature)
+	}
+}
+
+func TestHTTPWhisperClientRejectsInvalidWordTimings(t *testing.T) {
+	cases := []struct {
+		name     string
+		respJSON string
+	}{
+		{
+			name: "negative start timestamp",
+			respJSON: `{
+				"segments": [{"words": [{"word": "bad", "start": -0.5, "end": 1.0}]}]
+			}`,
+		},
+		{
+			name: "reversed interval",
+			respJSON: `{
+				"segments": [{"words": [{"word": "bad", "start": 1.5, "end": 1.0}]}]
+			}`,
+		},
+		{
+			name: "overlapping/non-monotonic intervals",
+			respJSON: `{
+				"segments": [{"words": [
+					{"word": "first", "start": 0.0, "end": 1.0},
+					{"word": "second", "start": 0.5, "end": 1.5}
+				]}]
+			}`,
+		},
+		{
+			name: "non-finite timestamp",
+			respJSON: fmt.Sprintf(`{
+				"segments": [{"words": [{"word": "bad", "start": %f, "end": 1.0}]}]
+			}`, math.NaN()),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.respJSON)
+			}))
+			defer server.Close()
+
+			client := NewHTTPWhisperClient(server.URL, WhisperTimeout)
+			wt, err := client.AlignOutput(context.Background(), []byte("PCM-BYTES"))
+			if err == nil && wt != nil {
+				t.Errorf("AlignOutput returned success %+v, want error for invalid timing", wt)
+			}
+		})
 	}
 }

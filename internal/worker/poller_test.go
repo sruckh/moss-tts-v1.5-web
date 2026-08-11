@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -314,5 +315,144 @@ func TestPollerRoutesByEngineModel(t *testing.T) {
 				t.Errorf("StatusHiggs calls = %d, want %d", client.statusHiggsCalls, tc.wantHiggs)
 			}
 		})
+	}
+}
+
+type mockAligner struct {
+	fn func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error)
+}
+
+func (m *mockAligner) AlignOutput(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+	return m.fn(ctx, pcmWav)
+}
+
+func TestPollerAlignsCompletedHiggsWAV(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wavBytes := []byte("RIFFxxxxWAVEfmt ")
+	encodedWav := base64.StdEncoding.EncodeToString(wavBytes)
+
+	job := jobs.Job{ID: 88, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-88", Model: jobs.HiggsModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:            "rp-88",
+				Status:        runpod.StatusCompleted,
+				DelayTime:     100,
+				ExecutionTime: 500,
+				Output: runpod.Output{
+					AudioBase64: encodedWav,
+					Format:      "wav",
+					SampleRate:  24000,
+				},
+			}, nil
+		},
+	}
+
+	var alignedBytes []byte
+	aligner := &mockAligner{
+		fn: func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+			alignedBytes = pcmWav
+			return &runpod.WordTimings{
+				Source: "whisper_cpp",
+				Words:  []runpod.WordTiming{{W: "Hello", Start: 0.1, End: 0.5}},
+			}, nil
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log, WithPollerAligner(aligner), WithPollerInterval(10))
+	poller.Tick(context.Background())
+
+	if store.ready[88] != jobs.StatusReady {
+		t.Fatal("job 88 was not marked ready")
+	}
+	if string(alignedBytes) != string(wavBytes) {
+		t.Errorf("alignedBytes = %q, want %q", alignedBytes, wavBytes)
+	}
+	gotAlignment := store.alignment[88]
+	if !strings.Contains(gotAlignment, `"whisper_cpp"`) || !strings.Contains(gotAlignment, `"Hello"`) {
+		t.Errorf("alignment[88] = %q, want JSON with whisper_cpp source and word Hello", gotAlignment)
+	}
+}
+
+func TestPollerHiggsAlignmentFailureStillMarksReady(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wavBytes := []byte("RIFFxxxxWAVEfmt ")
+	encodedWav := base64.StdEncoding.EncodeToString(wavBytes)
+
+	job := jobs.Job{ID: 89, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-89", Model: jobs.HiggsModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:     "rp-89",
+				Status: runpod.StatusCompleted,
+				Output: runpod.Output{AudioBase64: encodedWav, Format: "wav", SampleRate: 24000},
+			}, nil
+		},
+	}
+
+	aligner := &mockAligner{
+		fn: func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+			return nil, errors.New("whisper sidecar timeout")
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log, WithPollerAligner(aligner), WithPollerInterval(10))
+	poller.Tick(context.Background())
+
+	if store.ready[89] != jobs.StatusReady {
+		t.Fatal("job 89 was not marked ready on alignment error")
+	}
+	if store.alignment[89] != "" {
+		t.Errorf("alignment[89] = %q, want empty string when alignment fails", store.alignment[89])
+	}
+	if store.failed[89] != "" {
+		t.Errorf("failed[89] = %q, want job not failed on alignment error", store.failed[89])
+	}
+}
+
+func TestPollerMOSSBypassesLocalAlignment(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wavBytes := []byte("RIFFxxxxWAVEfmt ")
+	encodedWav := base64.StdEncoding.EncodeToString(wavBytes)
+
+	job := jobs.Job{ID: 90, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-90", Model: jobs.DefaultModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:     "rp-90",
+				Status: runpod.StatusCompleted,
+				Output: runpod.Output{
+					AudioBase64: encodedWav, Format: "wav", SampleRate: 24000,
+					WordTimings: &runpod.WordTimings{
+						Source: "moss_native",
+						Words:  []runpod.WordTiming{{W: "MossWord", Start: 0.0, End: 0.4}},
+					},
+				},
+			}, nil
+		},
+	}
+
+	alignerCalled := false
+	aligner := &mockAligner{
+		fn: func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+			alignerCalled = true
+			return nil, errors.New("should not be called")
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log, WithPollerAligner(aligner), WithPollerInterval(10))
+	poller.Tick(context.Background())
+
+	if alignerCalled {
+		t.Fatal("local aligner was called for MOSS job, want bypass")
+	}
+	if store.ready[90] != jobs.StatusReady {
+		t.Fatal("job 90 was not marked ready")
+	}
+	if got := store.alignment[90]; !strings.Contains(got, `"moss_native"`) || !strings.Contains(got, `"MossWord"`) {
+		t.Errorf("alignment[90] = %q, want native MOSS timings preserved", got)
 	}
 }

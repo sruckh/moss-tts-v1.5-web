@@ -33,9 +33,14 @@ reference, rendered in itself.
   `Dockerfile.whisper`, joins only `shared_net`, publishes no host port and
   receives no RunPod, Infisical, auth/session or S3 credentials. The pinned
   whisper.cpp v1.7.1 server has no `/health` route; its Docker healthcheck probes
-  `GET /`, while transcription uses `POST /inference`. Stopping only the sidecar
-  is the rollback fallback: MOSS jobs and the app UI stay available; restore it
-  with `docker compose up -d --no-deps whisper-server` and wait for `healthy`.
+  `GET /`, while reference transcription (`response_format=json`) and Higgs output
+  alignment (`WhisperAligner`, `response_format=verbose_json`, `token_timestamps=true`)
+  use `POST /inference`. The poller invokes output alignment on completed Higgs PCM
+  WAV audio before `MarkReady` (`source: whisper_cpp`); Moss renders bypass local
+  alignment and preserve native timings. Alignment failures log a privacy-safe
+  warning and save empty alignment (`""`) so the player uses proportional fallback.
+  Stopping only the sidecar is the rollback fallback: MOSS jobs and the app UI stay
+  available; restore it with `docker compose up -d --no-deps whisper-server` and wait for `healthy`.
 - **Reference audio is delivered to RunPod as base64 inline, not a public URL.**
   Uploaded samples are stored as blobs and base64-encoded into the RunPod
   submission payload by the worker (confirmed working from testing). There is no

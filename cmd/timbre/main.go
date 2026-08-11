@@ -90,8 +90,9 @@ func run(log *slog.Logger) error {
 	if !runpodClient.Configured() {
 		log.Warn("RunPod endpoint or API key missing; queued jobs will fail until both are set")
 	}
-	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log)
-	poller := worker.NewPoller(jobStore, runpodClient, cfg.AudioDir, log)
+	whisperClient := worker.NewHTTPWhisperClient(worker.DefaultWhisperURL, worker.WhisperTimeout)
+	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log, worker.WithWhisperClient(whisperClient))
+	poller := worker.NewPoller(jobStore, runpodClient, cfg.AudioDir, log, worker.WithPollerAligner(whisperClient))
 
 	var workerDone sync.WaitGroup
 	workerDone.Add(2)

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -106,6 +107,12 @@ type WhisperTranscriber interface {
 	Transcribe(ctx context.Context, data []byte, format string) (string, error)
 }
 
+// WhisperAligner performs forced word alignment on completed audio (e.g. PCM WAV bytes)
+// via whisper-server, returning structured word timings.
+type WhisperAligner interface {
+	AlignOutput(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error)
+}
+
 // transcriptionLease tracks one voice's in-process claim state. Timbre runs a
 // single worker goroutine (see Tick), so this in-memory map is the atomic
 // claim mechanism — there is no second replica it needs to coordinate with,
@@ -124,8 +131,12 @@ type httpWhisperClient struct {
 	http    *http.Client
 }
 
-func newHTTPWhisperClient(baseURL string, timeout time.Duration) *httpWhisperClient {
+func NewHTTPWhisperClient(baseURL string, timeout time.Duration) *httpWhisperClient {
 	return &httpWhisperClient{baseURL: baseURL, timeout: timeout, http: &http.Client{}}
+}
+
+func newHTTPWhisperClient(baseURL string, timeout time.Duration) *httpWhisperClient {
+	return NewHTTPWhisperClient(baseURL, timeout)
 }
 
 // Transcribe posts audio bytes to whisper-server and returns the trimmed
@@ -181,6 +192,136 @@ func (c *httpWhisperClient) Transcribe(ctx context.Context, data []byte, format 
 		return "", fmt.Errorf("whisper: decode response: %w", err)
 	}
 	return strings.TrimSpace(parsed.Text), nil
+}
+
+func isPunctuation(s string) bool {
+	return strings.Trim(s, ".,!?:;\"'()-_~`«»“”‘’") == ""
+}
+
+// AlignOutput posts PCM WAV audio bytes to whisper-server with verbose_json formatting
+// and token_timestamps enabled, returning parsed and validated word timings.
+func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+	if len(pcmWav) == 0 {
+		return nil, fmt.Errorf("whisper: empty audio data")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "output.wav")
+	if err != nil {
+		return nil, fmt.Errorf("whisper: build form file: %w", err)
+	}
+	if _, err := fw.Write(pcmWav); err != nil {
+		return nil, fmt.Errorf("whisper: write audio: %w", err)
+	}
+	if err := mw.WriteField("response_format", "verbose_json"); err != nil {
+		return nil, fmt.Errorf("whisper: write response_format field: %w", err)
+	}
+	if err := mw.WriteField("token_timestamps", "true"); err != nil {
+		return nil, fmt.Errorf("whisper: write token_timestamps field: %w", err)
+	}
+	if err := mw.WriteField("temperature", "0.0"); err != nil {
+		return nil, fmt.Errorf("whisper: write temperature field: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return nil, fmt.Errorf("whisper: close multipart body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/inference", &body)
+	if err != nil {
+		return nil, fmt.Errorf("whisper: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("whisper: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("whisper: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("whisper: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var parsed struct {
+		Segments []struct {
+			Words []struct {
+				Word  string  `json:"word"`
+				W     string  `json:"w"`
+				Start float64 `json:"start"`
+				End   float64 `json:"end"`
+			} `json:"words"`
+		} `json:"segments"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("whisper: decode response: %w", err)
+	}
+
+	var words []runpod.WordTiming
+	var lastEnd float64 = 0
+
+	for _, seg := range parsed.Segments {
+		for _, wObj := range seg.Words {
+			text := strings.TrimSpace(wObj.Word)
+			if text == "" {
+				text = strings.TrimSpace(wObj.W)
+			}
+			if text == "" {
+				continue
+			}
+			start := wObj.Start
+			end := wObj.End
+
+			if math.IsNaN(start) || math.IsNaN(end) || math.IsInf(start, 0) || math.IsInf(end, 0) {
+				return nil, fmt.Errorf("whisper: non-finite timestamp for word %q: start=%f, end=%f", text, start, end)
+			}
+			if start < 0 || end < 0 {
+				return nil, fmt.Errorf("whisper: negative timestamp for word %q: start=%f, end=%f", text, start, end)
+			}
+
+			// If standalone punctuation, attach it to the preceding word if present.
+			if isPunctuation(text) {
+				if len(words) > 0 {
+					words[len(words)-1].W += text
+					if end > words[len(words)-1].End {
+						words[len(words)-1].End = end
+						lastEnd = end
+					}
+				}
+				continue
+			}
+
+			if end <= start {
+				return nil, fmt.Errorf("whisper: invalid interval for word %q: start=%f, end=%f", text, start, end)
+			}
+			if len(words) > 0 && start < lastEnd {
+				return nil, fmt.Errorf("whisper: overlapping/non-monotonic timestamp for word %q: start=%f < previous end=%f", text, start, lastEnd)
+			}
+
+			words = append(words, runpod.WordTiming{
+				W:     text,
+				Start: start,
+				End:   end,
+			})
+			lastEnd = end
+		}
+	}
+
+	if len(words) == 0 {
+		return nil, nil
+	}
+
+	return &runpod.WordTimings{
+		Source: "whisper_cpp",
+		Words:  words,
+	}, nil
 }
 
 // Worker drains queued jobs into RunPod.

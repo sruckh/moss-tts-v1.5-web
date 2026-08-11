@@ -36,6 +36,7 @@ type StatusClient interface {
 type Poller struct {
 	jobs     PollerJobStore
 	client   StatusClient
+	aligner  WhisperAligner
 	audioDir string
 	log      *slog.Logger
 	interval time.Duration
@@ -50,6 +51,13 @@ func WithPollerInterval(d time.Duration) PollerOption {
 		if d > 0 {
 			p.interval = d
 		}
+	}
+}
+
+// WithPollerAligner sets the OutputAligner used for completed Higgs audio renders.
+func WithPollerAligner(a WhisperAligner) PollerOption {
+	return func(p *Poller) {
+		p.aligner = a
 	}
 }
 
@@ -187,10 +195,27 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		// older builds, or failed alignment. nil ⇒ empty string ⇒ the player
 		// interpolates word positions. A marshal failure is treated like absence
 		// — it never fails a job that already has good audio.
+		//
+		// For completed Higgs jobs, word alignment is performed via the local
+		// Whisper aligner on the saved PCM WAV bytes. MOSS completion payloads
+		// bypass local alignment and preserve native word_timings verbatim.
 		alignmentJSON := ""
-		if res.Output.WordTimings != nil {
-			if b, err := json.Marshal(res.Output.WordTimings); err == nil {
-				alignmentJSON = string(b)
+		if job.IsHiggs() {
+			if p.aligner != nil {
+				wt, err := p.aligner.AlignOutput(ctx, audioData)
+				if err != nil {
+					p.log.Warn("poller: higgs word alignment failed", "job", job.ID, "err", err)
+				} else if wt != nil {
+					if b, err := json.Marshal(wt); err == nil {
+						alignmentJSON = string(b)
+					}
+				}
+			}
+		} else {
+			if res.Output.WordTimings != nil {
+				if b, err := json.Marshal(res.Output.WordTimings); err == nil {
+					alignmentJSON = string(b)
+				}
 			}
 		}
 
