@@ -285,6 +285,9 @@ func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*ru
 			if start < 0 || end < 0 {
 				return nil, fmt.Errorf("whisper: negative timestamp for word %q: start=%f, end=%f", text, start, end)
 			}
+			if end < start {
+				return nil, fmt.Errorf("whisper: reversed interval for word %q: start=%f, end=%f", text, start, end)
+			}
 
 			// If standalone punctuation, attach it to the preceding word if present.
 			if isPunctuation(text) {
@@ -298,11 +301,14 @@ func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*ru
 				continue
 			}
 
-			if end <= start {
-				return nil, fmt.Errorf("whisper: invalid interval for word %q: start=%f, end=%f", text, start, end)
-			}
+			// Strictly non-monotonic or overlapping start time check.
 			if len(words) > 0 && start < lastEnd {
 				return nil, fmt.Errorf("whisper: overlapping/non-monotonic timestamp for word %q: start=%f < previous end=%f", text, start, lastEnd)
+			}
+
+			// Ensure zero-duration words get a minimum 50ms display interval.
+			if end <= start {
+				end = start + 0.05
 			}
 
 			words = append(words, runpod.WordTiming{
