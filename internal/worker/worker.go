@@ -265,6 +265,7 @@ func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*ru
 	}
 
 	var words []runpod.WordTiming
+	var lastStart float64 = -1
 	var lastEnd float64 = 0
 
 	for _, seg := range parsed.Segments {
@@ -301,9 +302,14 @@ func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*ru
 				continue
 			}
 
-			// Strictly non-monotonic or overlapping start time check.
+			// Strictly non-monotonic start time check (jumping backwards in time).
+			if len(words) > 0 && start < lastStart {
+				return nil, fmt.Errorf("whisper: non-monotonic timestamp for word %q: start=%f < previous start=%f", text, start, lastStart)
+			}
+
+			// Clamp overlapping start time with previous word's end time.
 			if len(words) > 0 && start < lastEnd {
-				return nil, fmt.Errorf("whisper: overlapping/non-monotonic timestamp for word %q: start=%f < previous end=%f", text, start, lastEnd)
+				start = lastEnd
 			}
 
 			// Ensure zero-duration words get a minimum 50ms display interval.
@@ -316,6 +322,7 @@ func (c *httpWhisperClient) AlignOutput(ctx context.Context, pcmWav []byte) (*ru
 				Start: start,
 				End:   end,
 			})
+			lastStart = start
 			lastEnd = end
 		}
 	}

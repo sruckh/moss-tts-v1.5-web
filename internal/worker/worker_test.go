@@ -897,11 +897,11 @@ func TestHTTPWhisperClientRejectsInvalidWordTimings(t *testing.T) {
 			}`,
 		},
 		{
-			name: "overlapping/non-monotonic intervals",
+			name: "non-monotonic backwards jump",
 			respJSON: `{
 				"segments": [{"words": [
-					{"word": "first", "start": 0.0, "end": 1.0},
-					{"word": "second", "start": 0.5, "end": 1.5}
+					{"word": "first", "start": 5.0, "end": 6.0},
+					{"word": "second", "start": 1.0, "end": 2.0}
 				]}]
 			}`,
 		},
