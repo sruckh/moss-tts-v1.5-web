@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -65,6 +66,10 @@ func (m *mockStatusClient) Status(ctx context.Context, id string) (runpod.Status
 }
 
 func (m *mockStatusClient) StatusHiggs(ctx context.Context, id string) (runpod.StatusResult, error) {
+	return m.fn(ctx, id)
+}
+
+func (m *mockStatusClient) StatusBreeze(ctx context.Context, id string) (runpod.StatusResult, error) {
 	return m.fn(ctx, id)
 }
 
@@ -155,6 +160,47 @@ func TestPollerHandlesFailedStatus(t *testing.T) {
 
 	if reason, ok := store.failed[99]; !ok || reason != "GPU out of memory" {
 		t.Errorf("failed[99] = %q, want 'GPU out of memory'", reason)
+	}
+}
+
+// TestPollerBreezeFailureUsesNestedErrorEnvelope covers the case ErrorString
+// alone cannot: a Breeze worker failure that lands in Output.Error rather than
+// the top-level Error RunPod's runtime lifts a handler error into. Without
+// consulting BreezeError, this would fall through to the generic
+// "RunPod execution failed" and lose the worker's code/field/message.
+func TestPollerBreezeFailureUsesNestedErrorEnvelope(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	job := jobs.Job{
+		ID:       100,
+		UserID:   1,
+		Status:   jobs.StatusInProgress,
+		RunPodID: "rp-100",
+		Model:    jobs.BreezeModel,
+	}
+
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:     "rp-100",
+				Status: runpod.StatusFailed,
+				Output: runpod.Output{
+					Error: json.RawMessage(`{"code":"reference_audio_too_large","field":"reference_audio","message":"clip exceeds 4 MiB decoded"}`),
+				},
+			}, nil
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log)
+	poller.Tick(context.Background())
+
+	reason, ok := store.failed[100]
+	if !ok {
+		t.Fatal("job 100 was not failed")
+	}
+	if !strings.Contains(reason, "reference_audio_too_large") || !strings.Contains(reason, "clip exceeds 4 MiB decoded") {
+		t.Errorf("failed[100] = %q, want the nested envelope's code and message, not the generic fallback", reason)
 	}
 }
 
@@ -269,10 +315,11 @@ func TestPollerThreadsWordTimings(t *testing.T) {
 // routingStatusClient records which status method was called so a test can
 // assert the poller routes by engine model.
 type routingStatusClient struct {
-	statusCalls      int
-	statusHiggsCalls int
-	result           runpod.StatusResult
-	err              error
+	statusCalls       int
+	statusHiggsCalls  int
+	statusBreezeCalls int
+	result            runpod.StatusResult
+	err               error
 }
 
 func (r *routingStatusClient) Status(context.Context, string) (runpod.StatusResult, error) {
@@ -285,20 +332,27 @@ func (r *routingStatusClient) StatusHiggs(context.Context, string) (runpod.Statu
 	return r.result, r.err
 }
 
+func (r *routingStatusClient) StatusBreeze(context.Context, string) (runpod.StatusResult, error) {
+	r.statusBreezeCalls++
+	return r.result, r.err
+}
+
 // TestPollerRoutesByEngineModel asserts a Higgs job is polled through
 // StatusHiggs and a MOSS job through Status.
 func TestPollerRoutesByEngineModel(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 
 	cases := []struct {
-		name      string
-		model     string
-		wantMoss  int
-		wantHiggs int
+		name       string
+		model      string
+		wantMoss   int
+		wantHiggs  int
+		wantBreeze int
 	}{
-		{"moss", jobs.DefaultModel, 1, 0},
-		{"blank defaults to moss", "", 1, 0},
-		{"higgs", jobs.HiggsModel, 0, 1},
+		{"moss", jobs.DefaultModel, 1, 0, 0},
+		{"blank defaults to moss", "", 1, 0, 0},
+		{"higgs", jobs.HiggsModel, 0, 1, 0},
+		{"breeze", jobs.BreezeModel, 0, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,6 +367,9 @@ func TestPollerRoutesByEngineModel(t *testing.T) {
 			}
 			if client.statusHiggsCalls != tc.wantHiggs {
 				t.Errorf("StatusHiggs calls = %d, want %d", client.statusHiggsCalls, tc.wantHiggs)
+			}
+			if client.statusBreezeCalls != tc.wantBreeze {
+				t.Errorf("StatusBreeze calls = %d, want %d", client.statusBreezeCalls, tc.wantBreeze)
 			}
 		})
 	}
@@ -454,5 +511,108 @@ func TestPollerMOSSBypassesLocalAlignment(t *testing.T) {
 	}
 	if got := store.alignment[90]; !strings.Contains(got, `"moss_native"`) || !strings.Contains(got, `"MossWord"`) {
 		t.Errorf("alignment[90] = %q, want native MOSS timings preserved", got)
+	}
+}
+
+// TestPollerAlignsCompletedBreezeWAV asserts a completed Breeze job is aligned
+// by the local Whisper aligner and the timings land on the row. Breeze carries
+// no native timings at all — its worker's success payload has no word_timings
+// field — so the aligner is the only source it has. The decoy WordTimings on
+// the output proves the payload is never consulted for a Breeze job: even if
+// a future worker sent the field, the stored alignment comes from the aligner.
+func TestPollerAlignsCompletedBreezeWAV(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wavBytes := []byte("RIFFxxxxWAVEfmt ")
+	encodedWav := base64.StdEncoding.EncodeToString(wavBytes)
+
+	job := jobs.Job{ID: 91, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-91", Model: jobs.BreezeModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:            "rp-91",
+				Status:        runpod.StatusCompleted,
+				DelayTime:     100,
+				ExecutionTime: 500,
+				Output: runpod.Output{
+					AudioBase64: encodedWav,
+					Format:      "wav",
+					SampleRate:  24000,
+					WordTimings: &runpod.WordTimings{
+						Source: "decoy_native",
+						Words:  []runpod.WordTiming{{W: "Decoy", Start: 0.0, End: 0.1}},
+					},
+				},
+			}, nil
+		},
+	}
+
+	var alignedBytes []byte
+	aligner := &mockAligner{
+		fn: func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+			alignedBytes = pcmWav
+			return &runpod.WordTimings{
+				Source: "whisper_cpp",
+				Words:  []runpod.WordTiming{{W: "Breeze", Start: 0.2, End: 0.9}},
+			}, nil
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log, WithPollerAligner(aligner), WithPollerInterval(10))
+	poller.Tick(context.Background())
+
+	if store.ready[91] != jobs.StatusReady {
+		t.Fatal("job 91 was not marked ready")
+	}
+	if string(alignedBytes) != string(wavBytes) {
+		t.Errorf("alignedBytes = %q, want %q", alignedBytes, wavBytes)
+	}
+	gotAlignment := store.alignment[91]
+	if !strings.Contains(gotAlignment, `"whisper_cpp"`) || !strings.Contains(gotAlignment, `"Breeze"`) {
+		t.Errorf("alignment[91] = %q, want JSON with whisper_cpp source and word Breeze", gotAlignment)
+	}
+	if strings.Contains(gotAlignment, "decoy") || strings.Contains(gotAlignment, "Decoy") {
+		t.Errorf("alignment[91] = %q, want the payload's word_timings ignored for Breeze", gotAlignment)
+	}
+}
+
+// TestPollerBreezeAlignmentFailureStillMarksReady is the Breeze half of the
+// fail-open contract: when the whisper sidecar is down the job still reaches
+// READY with an empty alignment_json (the player interpolates), and is never
+// failed for an alignment problem.
+func TestPollerBreezeAlignmentFailureStillMarksReady(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	wavBytes := []byte("RIFFxxxxWAVEfmt ")
+	encodedWav := base64.StdEncoding.EncodeToString(wavBytes)
+
+	job := jobs.Job{ID: 92, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-92", Model: jobs.BreezeModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{
+		fn: func(ctx context.Context, id string) (runpod.StatusResult, error) {
+			return runpod.StatusResult{
+				ID:     "rp-92",
+				Status: runpod.StatusCompleted,
+				Output: runpod.Output{AudioBase64: encodedWav, Format: "wav", SampleRate: 24000},
+			}, nil
+		},
+	}
+
+	aligner := &mockAligner{
+		fn: func(ctx context.Context, pcmWav []byte) (*runpod.WordTimings, error) {
+			return nil, errors.New("whisper sidecar timeout")
+		},
+	}
+
+	poller := NewPoller(store, client, t.TempDir(), log, WithPollerAligner(aligner), WithPollerInterval(10))
+	poller.Tick(context.Background())
+
+	if store.ready[92] != jobs.StatusReady {
+		t.Fatal("job 92 was not marked ready on alignment error")
+	}
+	if store.alignment[92] != "" {
+		t.Errorf("alignment[92] = %q, want empty string when alignment fails", store.alignment[92])
+	}
+	if store.failed[92] != "" {
+		t.Errorf("failed[92] = %q, want job not failed on alignment error", store.failed[92])
 	}
 }

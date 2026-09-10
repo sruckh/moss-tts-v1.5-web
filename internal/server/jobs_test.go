@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -645,5 +646,256 @@ func TestDeleteJobRoute(t *testing.T) {
 	// Verify audio file deleted from disk
 	if _, err := os.Stat(audioFile); !os.IsNotExist(err) {
 		t.Errorf("audio file %s still exists after DELETE", audioFile)
+	}
+}
+
+// TestCreateJobBreezeModes asserts the per-mode contract of the Breeze engine:
+// each mode stores the right params_json, and design — the one render that
+// legitimately has no voice — enqueues with no voice_id posted and stores a
+// NULL link (read back as VoiceID 0), even when the request names a voice.
+func TestCreateJobBreezeModes(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voiceID := firstVoiceID(t, srv, cookie)
+	voice := strconv.FormatInt(voiceID, 10)
+
+	t.Run("clone", func(t *testing.T) {
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":     {"clone me"},
+			"voice_id": {voice},
+			"model":    {jobs.BreezeModel},
+			"mode":     {"clone"},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if created.Model != jobs.BreezeModel {
+			t.Errorf("Model = %q, want %q", created.Model, jobs.BreezeModel)
+		}
+		if got := created.Params()["mode"]; got != "clone" {
+			t.Errorf("params mode = %v, want clone", got)
+		}
+		if created.VoiceID != voiceID {
+			t.Errorf("VoiceID = %d, want %d — clone keeps the voice link", created.VoiceID, voiceID)
+		}
+	})
+
+	t.Run("clone with cfg_scale", func(t *testing.T) {
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":      {"scaled"},
+			"voice_id":  {voice},
+			"model":     {jobs.BreezeModel},
+			"mode":      {"clone"},
+			"cfg_scale": {"4"},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got := created.Params()["cfg_scale"]; got != float64(4) {
+			t.Errorf("params cfg_scale = %v, want 4", got)
+		}
+	})
+
+	t.Run("design posts no voice_id", func(t *testing.T) {
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":     {"designed voice"},
+			"model":    {jobs.BreezeModel},
+			"mode":     {"design"},
+			"instruct": {"a warm narrator"},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — design must not require a voice (body %q)", rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if created.VoiceID != 0 {
+			t.Errorf("VoiceID = %d, want 0 (SQL NULL) for a design render", created.VoiceID)
+		}
+		params := created.Params()
+		if params["mode"] != "design" || params["instruct"] != "a warm narrator" {
+			t.Errorf("params = %v, want mode=design instruct=a warm narrator", params)
+		}
+	})
+
+	t.Run("design naming a voice still stores no link", func(t *testing.T) {
+		// The voice library stays visible in design mode, so this request
+		// shape is possible; the render is instruction-only, so the link is
+		// deliberately not stored.
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":     {"designed despite the click"},
+			"voice_id": {voice},
+			"model":    {jobs.BreezeModel},
+			"mode":     {"design"},
+			"instruct": {"a warm narrator"},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if created.VoiceID != 0 {
+			t.Errorf("VoiceID = %d, want 0 — design ignores a named voice", created.VoiceID)
+		}
+	})
+
+	t.Run("direction", func(t *testing.T) {
+		rec := postJob(t, srv, cookie, url.Values{
+			"text":     {"directed clone"},
+			"voice_id": {voice},
+			"model":    {jobs.BreezeModel},
+			"mode":     {"direction"},
+			"instruct": {"cheerful"},
+		}, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		params := created.Params()
+		if params["mode"] != "direction" || params["instruct"] != "cheerful" {
+			t.Errorf("params = %v, want mode=direction instruct=cheerful", params)
+		}
+		if created.VoiceID != voiceID {
+			t.Errorf("VoiceID = %d, want %d — direction keeps the voice link", created.VoiceID, voiceID)
+		}
+	})
+}
+
+// TestCreateJobBreezeValidation asserts the Breeze-specific 400s and that none
+// of the rejected requests reach the queue.
+func TestCreateJobBreezeValidation(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voice := strconv.FormatInt(firstVoiceID(t, srv, cookie), 10)
+
+	tests := []struct {
+		name string
+		form url.Values
+	}{
+		{"unknown mode", url.Values{
+			"text": {"hi"}, "voice_id": {voice}, "model": {jobs.BreezeModel}, "mode": {"weave"},
+		}},
+		{"breeze with no mode", url.Values{
+			"text": {"hi"}, "voice_id": {voice}, "model": {jobs.BreezeModel},
+		}},
+		{"design without instruct", url.Values{
+			"text": {"hi"}, "model": {jobs.BreezeModel}, "mode": {"design"},
+		}},
+		{"direction without instruct", url.Values{
+			"text": {"hi"}, "voice_id": {voice}, "model": {jobs.BreezeModel}, "mode": {"direction"},
+		}},
+		{"unparseable cfg_scale", url.Values{
+			"text": {"hi"}, "voice_id": {voice}, "model": {jobs.BreezeModel},
+			"mode": {"clone"}, "cfg_scale": {"fast"},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJob(t, srv, cookie, tc.form, "application/json")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/jobs", nil)
+	req.Header.Set("Accept", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var items []jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("decode queue %q: %v", rec.Body.String(), err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("queue has %d jobs after rejected Breeze requests, want 0", len(items))
+	}
+}
+
+// TestHiddenBreezeFieldsDoNotLeakIntoOtherEngines is the D2 regression guard.
+// The studio hides the Breeze controls with x-show, which sets display:none —
+// the fields still submit. A MOSS or Higgs render therefore posts mode=clone,
+// instruct and cfg_scale whether or not anyone touched them. The stored
+// params_json (and with it the outbound Extra, which is params_json verbatim)
+// must be identical to the same request without those fields.
+func TestHiddenBreezeFieldsDoNotLeakIntoOtherEngines(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	voice := strconv.FormatInt(firstVoiceID(t, srv, cookie), 10)
+
+	todayFields := url.Values{
+		"text":           {"today's request"},
+		"voice_id":       {voice},
+		"max_new_tokens": {"1024"},
+		"seed":           {"7"},
+		"pace":           {"1.5"},
+		"pitch":          {"2"},
+		"expressiveness": {"0.5"},
+		"normalize":      {"on"},
+		"output_48k":     {"on"},
+	}
+	hiddenBreezeFields := url.Values{
+		"mode":      {"clone"},
+		"instruct":  {"nobody touched this"},
+		"cfg_scale": {"4"},
+	}
+
+	post := func(model string, extra url.Values) jobs.Job {
+		t.Helper()
+		form := url.Values{"model": {model}}
+		for k, vs := range todayFields {
+			form[k] = vs
+		}
+		for k, vs := range extra {
+			form[k] = vs
+		}
+		rec := postJob(t, srv, cookie, form, "application/json")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("model %q status = %d, want 200 (body %q)", model, rec.Code, rec.Body.String())
+		}
+		var created jobs.Job
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return created
+	}
+
+	for _, model := range []string{jobs.DefaultModel, jobs.HiggsModel} {
+		t.Run(model, func(t *testing.T) {
+			clean := post(model, nil)
+			dirty := post(model, hiddenBreezeFields)
+
+			if !reflect.DeepEqual(clean.Params(), dirty.Params()) {
+				t.Errorf("params differ when hidden Breeze fields are present:\n clean: %v\n dirty: %v",
+					clean.Params(), dirty.Params())
+			}
+			for _, leaked := range []string{"mode", "instruct", "cfg_scale"} {
+				if _, ok := dirty.Params()[leaked]; ok {
+					t.Errorf("params_json carries %q — Breeze-only fields must not reach the %s worker as Extra", leaked, model)
+				}
+			}
+			// Pin the rest of the shape too, so a future field rename shows
+			// up here rather than at the worker.
+			if got := clean.Params()["seed"]; got != float64(7) {
+				t.Errorf("params seed = %v, want 7", got)
+			}
+			if got := clean.Params()["normalize"]; got != true {
+				t.Errorf("params normalize = %v, want true", got)
+			}
+		})
 	}
 }

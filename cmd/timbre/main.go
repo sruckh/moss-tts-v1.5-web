@@ -82,7 +82,8 @@ func run(log *slog.Logger) error {
 
 	jobStore := jobs.NewStore(handle)
 	runpodClient := runpod.New(cfg.RunPodEndpoint, cfg.RunPodAPIKey,
-		runpod.WithHiggsEndpoint(cfg.HiggsRunPodEndpoint))
+		runpod.WithHiggsEndpoint(cfg.HiggsRunPodEndpoint),
+		runpod.WithBreezeEndpoint(cfg.BreezeRunPodEndpoint))
 
 	// The submission worker is the only caller of RunPod. It starts even when
 	// the endpoint or key is missing: queued jobs then fail with a recorded

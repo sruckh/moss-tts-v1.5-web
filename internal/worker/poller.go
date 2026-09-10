@@ -29,6 +29,7 @@ type PollerJobStore interface {
 type StatusClient interface {
 	Status(ctx context.Context, id string) (runpod.StatusResult, error)
 	StatusHiggs(ctx context.Context, id string) (runpod.StatusResult, error)
+	StatusBreeze(ctx context.Context, id string) (runpod.StatusResult, error)
 }
 
 // Poller checks RunPod status for submitted/in_progress jobs, saves audio on completion,
@@ -118,9 +119,12 @@ func (p *Poller) Tick(ctx context.Context) {
 func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 	var res runpod.StatusResult
 	var err error
-	if job.IsHiggs() {
+	switch {
+	case job.IsHiggs():
 		res, err = p.client.StatusHiggs(ctx, job.RunPodID)
-	} else {
+	case job.IsBreeze():
+		res, err = p.client.StatusBreeze(ctx, job.RunPodID)
+	default:
 		res, err = p.client.Status(ctx, job.RunPodID)
 	}
 	if err != nil {
@@ -146,6 +150,16 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 
 	case runpod.StatusFailed:
 		reason := res.ErrorString()
+		// Breeze's structured failure envelope can land nested in
+		// Output.Error rather than at the top level (RunPod's runtime only
+		// lifts a top-level "error" key); ErrorString never looks there, so a
+		// nested envelope would otherwise be silently discarded in favor of
+		// the generic fallback below.
+		if job.IsBreeze() {
+			if env := res.BreezeError(); env != nil {
+				reason = env.Error()
+			}
+		}
 		if reason == "" {
 			reason = "RunPod execution failed"
 		}
@@ -196,15 +210,18 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		// interpolates word positions. A marshal failure is treated like absence
 		// — it never fails a job that already has good audio.
 		//
-		// For completed Higgs jobs, word alignment is performed via the local
-		// Whisper aligner on the saved PCM WAV bytes. MOSS completion payloads
-		// bypass local alignment and preserve native word_timings verbatim.
+		// For completed Higgs and Breeze jobs, word alignment is performed via
+		// the local Whisper aligner on the saved PCM WAV bytes. Breeze carries
+		// no native timings at all — its worker's success payload has no
+		// word_timings field — so the aligner is the only source it has. MOSS
+		// completion payloads bypass local alignment and preserve native
+		// word_timings verbatim.
 		alignmentJSON := ""
-		if job.IsHiggs() {
+		if job.IsHiggs() || job.IsBreeze() {
 			if p.aligner != nil {
 				wt, err := p.aligner.AlignOutput(ctx, audioData)
 				if err != nil {
-					p.log.Warn("poller: higgs word alignment failed", "job", job.ID, "err", err)
+					p.log.Warn("poller: output word alignment failed", "job", job.ID, "model", job.Model, "err", err)
 				} else if wt != nil {
 					if b, err := json.Marshal(wt); err == nil {
 						alignmentJSON = string(b)

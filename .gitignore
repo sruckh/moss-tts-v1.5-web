@@ -37,3 +37,6 @@ CLAUDE.md
 
 # ICM workspace scaffolding (spec only, not app source)
 .icm/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

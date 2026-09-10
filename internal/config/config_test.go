@@ -103,3 +103,39 @@ func TestHasRunPodKey(t *testing.T) {
 		t.Error("config with a key should report one")
 	}
 }
+
+// BREEZE_RUNPOD_ENDPOINT loads independently of the other two — a third,
+// separately deployed endpoint, not a reinterpretation of the MOSS or Higgs
+// one. All three share RUNPOD_API_KEY.
+func TestLoadBreezeEndpoint(t *testing.T) {
+	t.Setenv("RUNPOD_ENDPOINT", "https://api.runpod.ai/v2/moss-id")
+	t.Setenv(HiggsRunPodEndpointEnv, "https://api.runpod.ai/v2/higgs-id")
+	t.Setenv(BreezeRunPodEndpointEnv, "https://api.runpod.ai/v2/breeze-id/")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RunPodEndpoint != "https://api.runpod.ai/v2/moss-id" {
+		t.Errorf("RunPodEndpoint = %q, want the MOSS endpoint unchanged", cfg.RunPodEndpoint)
+	}
+	if cfg.HiggsRunPodEndpoint != "https://api.runpod.ai/v2/higgs-id" {
+		t.Errorf("HiggsRunPodEndpoint = %q, want the Higgs endpoint unchanged", cfg.HiggsRunPodEndpoint)
+	}
+	if cfg.BreezeRunPodEndpoint != "https://api.runpod.ai/v2/breeze-id" {
+		t.Errorf("BreezeRunPodEndpoint = %q, want the Breeze endpoint trimmed of its trailing slash", cfg.BreezeRunPodEndpoint)
+	}
+}
+
+func TestLoadBreezeEndpointDefaultsEmpty(t *testing.T) {
+	t.Setenv(BreezeRunPodEndpointEnv, "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BreezeRunPodEndpoint != "" {
+		t.Errorf("BreezeRunPodEndpoint = %q, want empty when %s is unset",
+			cfg.BreezeRunPodEndpoint, BreezeRunPodEndpointEnv)
+	}
+}

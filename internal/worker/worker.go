@@ -65,6 +65,7 @@ type ReferenceStore interface {
 type Submitter interface {
 	Submit(ctx context.Context, in runpod.Input) (runpod.Submission, error)
 	SubmitHiggs(ctx context.Context, in runpod.HiggsInput) (runpod.Submission, error)
+	SubmitBreeze(ctx context.Context, in runpod.BreezeInput) (runpod.Submission, error)
 }
 
 // DefaultWhisperURL is the private whisper-server sidecar's base URL. It is
@@ -514,6 +515,18 @@ func (w *Worker) submit(ctx context.Context, job jobs.Job) {
 			w.handleSubmitError(ctx, job, err)
 			return
 		}
+	} else if job.IsBreeze() {
+		breezeInput, err := w.buildBreezeInput(ctx, job)
+		if err != nil {
+			w.log.Error("worker: build breeze input", "job", job.ID, "err", err)
+			w.fail(ctx, job.ID, err.Error())
+			return
+		}
+		submission, err = w.client.SubmitBreeze(ctx, breezeInput)
+		if err != nil {
+			w.handleSubmitError(ctx, job, err)
+			return
+		}
 	} else {
 		input, err := w.buildInput(ctx, job)
 		if err != nil {
@@ -673,6 +686,89 @@ func (w *Worker) buildHiggsInput(ctx context.Context, job jobs.Job) (runpod.Higg
 	return input, nil
 }
 
+// breezeParamString reads one string parameter out of a job's stored
+// params_json. Absent and non-string both yield "" — the caller decides
+// whether that is fatal for its mode.
+func breezeParamString(params map[string]any, key string) string {
+	if v, ok := params[key].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// buildBreezeInput assembles a Breeze submission from the job's stored mode and
+// instruction. The mode drives everything: which fields the payload carries is
+// decided by runpod.BreezeInput.MarshalJSON, so this function's only job is to
+// supply the right values and to fail loudly when a mode's requirements are not
+// met — before a request reaches the worker and comes back as a
+// missing_required_field or forbidden_field_for_mode error.
+func (w *Worker) buildBreezeInput(ctx context.Context, job jobs.Job) (runpod.BreezeInput, error) {
+	params := job.Params()
+	mode := breezeParamString(params, "mode")
+	instruct := breezeParamString(params, "instruct")
+
+	input := runpod.BreezeInput{
+		Text:     job.Text,
+		Mode:     mode,
+		Instruct: instruct,
+	}
+	if cfg, ok := params["cfg_scale"].(float64); ok {
+		input.CfgScale = cfg
+	}
+
+	switch mode {
+	case runpod.BreezeModeDesign:
+		// Design carries no reference at all — the worker rejects one outright.
+		// Any voice the caller named is deliberately ignored here; the job row
+		// already stores voice_id NULL for design.
+		if instruct == "" {
+			return runpod.BreezeInput{}, fmt.Errorf("breeze design mode requires an instruction")
+		}
+		return input, nil
+
+	case runpod.BreezeModeClone, runpod.BreezeModeDirection:
+		if mode == runpod.BreezeModeDirection && instruct == "" {
+			return runpod.BreezeInput{}, fmt.Errorf("breeze direction mode requires an instruction")
+		}
+		if job.VoiceID == 0 {
+			return runpod.BreezeInput{}, fmt.Errorf("breeze %s mode requires a cloned reference voice", mode)
+		}
+
+		data, _, err := w.voices.Reference(ctx, job.VoiceID)
+		switch {
+		case errors.Is(err, voices.ErrNoReference):
+			return runpod.BreezeInput{}, fmt.Errorf("breeze %s mode requires a cloned voice; voice %d has no reference audio", mode, job.VoiceID)
+		case errors.Is(err, voices.ErrNotFound):
+			return runpod.BreezeInput{}, fmt.Errorf("voice %d was deleted before submission", job.VoiceID)
+		case err != nil:
+			return runpod.BreezeInput{}, err
+		}
+
+		voice, err := w.voices.Get(ctx, job.VoiceID)
+		if err != nil {
+			return runpod.BreezeInput{}, fmt.Errorf("load voice %d for transcript: %w", job.VoiceID, err)
+		}
+		if !voice.ReferenceTranscript.Valid || strings.TrimSpace(voice.ReferenceTranscript.V) == "" {
+			return runpod.BreezeInput{}, fmt.Errorf("breeze voice %d has no reference transcript", job.VoiceID)
+		}
+
+		input.References = []runpod.BreezeReference{{Audio: data}}
+		input.ReferenceText = strings.TrimSpace(voice.ReferenceTranscript.V)
+
+		// Enforce the worker's decoded-byte limits here, before anything is
+		// encoded or sent, exactly as the Higgs path does.
+		if err := runpod.ValidateBreezeReferences(input.References); err != nil {
+			return runpod.BreezeInput{}, err
+		}
+		return input, nil
+
+	case "":
+		return runpod.BreezeInput{}, fmt.Errorf("breeze jobs must carry an explicit mode (clone, design or direction)")
+	default:
+		return runpod.BreezeInput{}, fmt.Errorf("unknown breeze mode %q", mode)
+	}
+}
+
 // ensureTranscript guarantees a non-empty reference_transcript exists before a
 // job that needs one reaches RunPod. MOSS-TTS v1.5 jobs never read reference
 // transcripts, so they bypass this entirely — a total whisper-server outage
@@ -680,6 +776,13 @@ func (w *Worker) buildHiggsInput(ctx context.Context, job jobs.Job) (runpod.Higg
 func (w *Worker) ensureTranscript(ctx context.Context, job jobs.Job) error {
 	if job.Model == "" || job.Model == jobs.DefaultModel {
 		return nil // MOSS bypass
+	}
+	// Breeze design mode renders from an instruction alone. It has no reference
+	// voice to transcribe, so it leaves the gate the same way MOSS does — a new
+	// reason, not a new mechanism. Checked before VoiceID so a design job that
+	// somehow carries a voice link still bypasses.
+	if job.IsBreeze() && breezeParamString(job.Params(), "mode") == runpod.BreezeModeDesign {
+		return nil
 	}
 	if job.VoiceID == 0 {
 		return nil // no reference audio in play

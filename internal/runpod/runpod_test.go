@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -654,5 +655,526 @@ func TestOutputDecodesWordTimings(t *testing.T) {
 	}
 	if got3.Output.WordTimings == nil || len(got3.Output.WordTimings.Words) != 1 {
 		t.Errorf("array-form WordTimings = %+v, want one word", got3.Output.WordTimings)
+	}
+}
+
+// --- Breeze TTS 2 -----------------------------------------------------------
+//
+// Every field name, limit and error code asserted below comes from the Breeze
+// worker's own schema_validator.py (sruckh/breezetts-runpod). A payload
+// assertion that drifts from those names strands every Breeze job.
+
+// Criterion: clone mode sends reference_audio + reference_text and no instruct.
+func TestBreezePayloadCloneMode(t *testing.T) {
+	var gotInput map[string]any
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInput = decodeSubmission(t, r)
+		_, _ = io.WriteString(w, `{"id":"breeze-1","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "test-key", WithBreezeEndpoint(double.URL), WithHTTPClient(double.Client()))
+	got, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text:          "The quick brown fox.",
+		Mode:          BreezeModeClone,
+		References:    []BreezeReference{{Audio: []byte("ABC")}},
+		ReferenceText: "This is the reference transcript.",
+	})
+	if err != nil {
+		t.Fatalf("SubmitBreeze: %v", err)
+	}
+	if got.ID != "breeze-1" {
+		t.Errorf("ID = %q, want breeze-1", got.ID)
+	}
+
+	if gotInput["text"] != "The quick brown fox." {
+		t.Errorf("input.text = %v, want the script text", gotInput["text"])
+	}
+	if gotInput["mode"] != BreezeModeClone {
+		t.Errorf("input.mode = %v, want %s sent explicitly", gotInput["mode"], BreezeModeClone)
+	}
+	refs, ok := gotInput["reference_audio"].([]any)
+	if !ok || len(refs) != 1 {
+		t.Fatalf("input.reference_audio = %v, want a one-element array", gotInput["reference_audio"])
+	}
+	if refs[0] != base64.StdEncoding.EncodeToString([]byte("ABC")) {
+		t.Errorf("reference_audio[0] = %v, want the base64-encoded reference bytes", refs[0])
+	}
+	if gotInput["reference_text"] != "This is the reference transcript." {
+		t.Errorf("input.reference_text = %v, want the reference transcript", gotInput["reference_text"])
+	}
+	if gotInput["cfg_scale"] != breezeDefaultCfgScale {
+		t.Errorf("input.cfg_scale = %v, want the resolved default %v", gotInput["cfg_scale"], breezeDefaultCfgScale)
+	}
+	if gotInput["response_delivery"] != BreezeDeliveryBase64 {
+		t.Errorf("input.response_delivery = %v, want %s pinned on every request", gotInput["response_delivery"], BreezeDeliveryBase64)
+	}
+	if _, present := gotInput["instruct"]; present {
+		t.Error("clone mode must not send instruct — the worker ignores it")
+	}
+}
+
+// Criterion: direction mode sends reference_audio + reference_text + instruct.
+func TestBreezePayloadDirectionMode(t *testing.T) {
+	var gotInput map[string]any
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInput = decodeSubmission(t, r)
+		_, _ = io.WriteString(w, `{"id":"breeze-2","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "k", WithBreezeEndpoint(double.URL), WithHTTPClient(double.Client()))
+	_, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text:          "hello",
+		Mode:          BreezeModeDirection,
+		References:    []BreezeReference{{Audio: []byte("ABC")}},
+		ReferenceText: "transcript",
+		Instruct:      "Read it slowly, with warmth.",
+		CfgScale:      2.5,
+	})
+	if err != nil {
+		t.Fatalf("SubmitBreeze: %v", err)
+	}
+
+	if gotInput["mode"] != BreezeModeDirection {
+		t.Errorf("input.mode = %v, want %s", gotInput["mode"], BreezeModeDirection)
+	}
+	if _, ok := gotInput["reference_audio"].([]any); !ok {
+		t.Errorf("input.reference_audio = %v, want the encoded reference array", gotInput["reference_audio"])
+	}
+	if gotInput["reference_text"] != "transcript" {
+		t.Errorf("input.reference_text = %v, want transcript", gotInput["reference_text"])
+	}
+	if gotInput["instruct"] != "Read it slowly, with warmth." {
+		t.Errorf("input.instruct = %v, want the instruction", gotInput["instruct"])
+	}
+	if gotInput["cfg_scale"] != 2.5 {
+		t.Errorf("input.cfg_scale = %v, want the caller's 2.5", gotInput["cfg_scale"])
+	}
+}
+
+// Criterion: design mode sends instruct only. The worker REJECTS a design
+// request carrying reference_audio (forbidden_field_for_mode), so the key must
+// be absent — not empty, not null.
+func TestBreezePayloadDesignModeCarriesNoReference(t *testing.T) {
+	var gotInput map[string]any
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInput = decodeSubmission(t, r)
+		_, _ = io.WriteString(w, `{"id":"breeze-3","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "k", WithBreezeEndpoint(double.URL), WithHTTPClient(double.Client()))
+	_, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text:     "hello",
+		Mode:     BreezeModeDesign,
+		Instruct: "A calm, low-pitched narrator.",
+	})
+	if err != nil {
+		t.Fatalf("SubmitBreeze: %v", err)
+	}
+
+	if gotInput["mode"] != BreezeModeDesign {
+		t.Errorf("input.mode = %v, want %s", gotInput["mode"], BreezeModeDesign)
+	}
+	if gotInput["instruct"] != "A calm, low-pitched narrator." {
+		t.Errorf("input.instruct = %v, want the instruction", gotInput["instruct"])
+	}
+	if _, present := gotInput["reference_audio"]; present {
+		t.Error("design mode sent reference_audio — the worker rejects it as forbidden_field_for_mode")
+	}
+	if _, present := gotInput["reference_text"]; present {
+		t.Error("design mode must not send reference_text")
+	}
+	if gotInput["response_delivery"] != BreezeDeliveryBase64 {
+		t.Errorf("input.response_delivery = %v, want %s", gotInput["response_delivery"], BreezeDeliveryBase64)
+	}
+}
+
+// The payload shape follows Mode, never which fields happen to be populated:
+// stray references on a design input can never reach the worker.
+func TestBreezeDesignPayloadIgnoresStrayReferences(t *testing.T) {
+	raw, err := json.Marshal(BreezeInput{
+		Text:          "hi",
+		Mode:          BreezeModeDesign,
+		Instruct:      "A bright voice.",
+		References:    []BreezeReference{{Audio: []byte("ABC")}},
+		ReferenceText: "leftover",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := got["reference_audio"]; present {
+		t.Error("a design payload carried reference_audio despite the mode")
+	}
+	if _, present := got["reference_text"]; present {
+		t.Error("a design payload carried reference_text despite the mode")
+	}
+}
+
+func TestBreezeMarshalRejectsUnknownMode(t *testing.T) {
+	_, err := json.Marshal(BreezeInput{Text: "hi", Mode: "whisper"})
+	if err == nil {
+		t.Fatal("want an error for an unknown mode — the worker answers invalid_mode")
+	}
+	if !IsPermanent(err) {
+		t.Errorf("IsPermanent(%v) = false, want true", err)
+	}
+}
+
+// Criterion: 4 MiB decoded per clip — accepted at the bound, rejected one byte
+// over. The worker checks decoded bytes, so validation happens before encoding.
+func TestValidateBreezeReferencesPerClipBoundary(t *testing.T) {
+	atBound := []BreezeReference{{Audio: make([]byte, breezeMaxReferenceBytes)}}
+	if err := ValidateBreezeReferences(atBound); err != nil {
+		t.Errorf("ValidateBreezeReferences at exactly %d bytes = %v, want nil", breezeMaxReferenceBytes, err)
+	}
+
+	overBound := []BreezeReference{{Audio: make([]byte, breezeMaxReferenceBytes+1)}}
+	err := ValidateBreezeReferences(overBound)
+	if err == nil {
+		t.Fatalf("want an error one byte over the %d-byte per-clip limit", breezeMaxReferenceBytes)
+	}
+	if !IsPermanent(err) {
+		t.Error("an oversized reference must be permanent — retrying cannot shrink it")
+	}
+}
+
+// Criterion: 6 MiB decoded total — accepted at the bound, rejected one byte
+// over, even when no single clip breaches the per-clip limit.
+func TestValidateBreezeReferencesTotalBoundary(t *testing.T) {
+	atBound := []BreezeReference{
+		{Audio: make([]byte, breezeMaxReferenceBytes)},
+		{Audio: make([]byte, breezeMaxTotalBytes-breezeMaxReferenceBytes)},
+	}
+	if err := ValidateBreezeReferences(atBound); err != nil {
+		t.Errorf("ValidateBreezeReferences at exactly %d total bytes = %v, want nil", breezeMaxTotalBytes, err)
+	}
+
+	overBound := []BreezeReference{
+		{Audio: make([]byte, breezeMaxReferenceBytes)},
+		{Audio: make([]byte, breezeMaxTotalBytes-breezeMaxReferenceBytes+1)},
+	}
+	err := ValidateBreezeReferences(overBound)
+	if err == nil {
+		t.Fatalf("want an error one byte over the %d-byte total limit", breezeMaxTotalBytes)
+	}
+	if !IsPermanent(err) {
+		t.Error("an oversized reference total must be permanent")
+	}
+}
+
+// The worker's mode matrix, enforced before a request is spent discovering it.
+func TestValidateBreezeInputModeMatrix(t *testing.T) {
+	ref := []BreezeReference{{Audio: []byte("ABC")}}
+
+	tests := []struct {
+		name    string
+		in      BreezeInput
+		wantErr bool
+	}{
+		{"clone complete", BreezeInput{Text: "t", Mode: BreezeModeClone, References: ref, ReferenceText: "x"}, false},
+		{"clone without reference", BreezeInput{Text: "t", Mode: BreezeModeClone, ReferenceText: "x"}, true},
+		{"clone without reference_text", BreezeInput{Text: "t", Mode: BreezeModeClone, References: ref}, true},
+		{"direction complete", BreezeInput{Text: "t", Mode: BreezeModeDirection, References: ref, ReferenceText: "x", Instruct: "i"}, false},
+		{"direction without instruct", BreezeInput{Text: "t", Mode: BreezeModeDirection, References: ref, ReferenceText: "x"}, true},
+		{"design complete", BreezeInput{Text: "t", Mode: BreezeModeDesign, Instruct: "i"}, false},
+		{"design without instruct", BreezeInput{Text: "t", Mode: BreezeModeDesign}, true},
+		{"design carrying a reference", BreezeInput{Text: "t", Mode: BreezeModeDesign, Instruct: "i", References: ref}, true},
+		{"empty text", BreezeInput{Text: "   ", Mode: BreezeModeDesign, Instruct: "i"}, true},
+		{"unknown mode", BreezeInput{Text: "t", Mode: "sing", Instruct: "i"}, true},
+		{"empty mode is never inferred", BreezeInput{Text: "t", References: ref, ReferenceText: "x"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateBreezeInput(tc.in)
+			if tc.wantErr && err == nil {
+				t.Fatal("want a validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateBreezeInput: %v, want nil", err)
+			}
+			if tc.wantErr && !IsPermanent(err) {
+				t.Error("a validation error must be permanent")
+			}
+		})
+	}
+}
+
+// A payload the worker's own validator would reject must never reach it.
+func TestSubmitBreezeRejectsInvalidPayloadWithoutNetworkCall(t *testing.T) {
+	var hits int
+	double := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = io.WriteString(w, `{"id":"x","status":"IN_QUEUE"}`)
+	}))
+	defer double.Close()
+
+	client := New("", "k", WithBreezeEndpoint(double.URL), WithHTTPClient(double.Client()))
+	_, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text:       "hi",
+		Mode:       BreezeModeDesign,
+		Instruct:   "A bright voice.",
+		References: []BreezeReference{{Audio: make([]byte, breezeMaxReferenceBytes+1)}},
+	})
+	if err == nil {
+		t.Fatal("want a validation error")
+	}
+	if !IsPermanent(err) {
+		t.Error("a validation error must be permanent")
+	}
+	if hits != 0 {
+		t.Errorf("network calls = %d, want 0 — validation must happen before any request", hits)
+	}
+}
+
+func TestSubmitBreezeWithoutEndpoint(t *testing.T) {
+	client := New("https://api.runpod.ai/v2/moss", "key", WithHiggsEndpoint("https://api.runpod.ai/v2/higgs"))
+	_, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text: "hi", Mode: BreezeModeDesign, Instruct: "i",
+	})
+	if !errors.Is(err, ErrNoBreezeEndpoint) {
+		t.Fatalf("err = %v, want ErrNoBreezeEndpoint", err)
+	}
+	if !IsPermanent(err) {
+		t.Error("a missing Breeze endpoint must be permanent")
+	}
+}
+
+func TestStatusBreezeWithoutEndpoint(t *testing.T) {
+	client := New("https://api.runpod.ai/v2/moss", "key")
+	_, err := client.StatusBreeze(context.Background(), "x")
+	if !errors.Is(err, ErrNoBreezeEndpoint) {
+		t.Fatalf("err = %v, want ErrNoBreezeEndpoint", err)
+	}
+	if !IsPermanent(err) {
+		t.Error("a missing Breeze endpoint must be permanent")
+	}
+}
+
+// Three engines, three separately deployed endpoints, one bearer token: no
+// engine's request ever reaches another engine's server.
+func TestBreezeRoutesToItsOwnEndpoint(t *testing.T) {
+	var mossHits, higgsHits, breezeHits int
+	var breezeAuth, breezePath string
+
+	moss := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mossHits++
+		_, _ = io.WriteString(w, `{"id":"moss-1","status":"IN_QUEUE"}`)
+	}))
+	defer moss.Close()
+	higgs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		higgsHits++
+		_, _ = io.WriteString(w, `{"id":"higgs-1","status":"IN_QUEUE"}`)
+	}))
+	defer higgs.Close()
+	breeze := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		breezeHits++
+		breezeAuth, breezePath = r.Header.Get("Authorization"), r.URL.Path
+		_, _ = io.WriteString(w, `{"id":"breeze-1","status":"IN_QUEUE"}`)
+	}))
+	defer breeze.Close()
+
+	client := New(moss.URL, "shared-key",
+		WithHiggsEndpoint(higgs.URL),
+		WithBreezeEndpoint(breeze.URL),
+		WithHTTPClient(moss.Client()))
+
+	if _, err := client.Submit(context.Background(), Input{Text: "hi"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if _, err := client.SubmitHiggs(context.Background(), HiggsInput{Text: "hi"}); err != nil {
+		t.Fatalf("SubmitHiggs: %v", err)
+	}
+	if _, err := client.SubmitBreeze(context.Background(), BreezeInput{
+		Text: "hi", Mode: BreezeModeDesign, Instruct: "i",
+	}); err != nil {
+		t.Fatalf("SubmitBreeze: %v", err)
+	}
+
+	if mossHits != 1 || higgsHits != 1 || breezeHits != 1 {
+		t.Errorf("hits moss/higgs/breeze = %d/%d/%d, want 1/1/1", mossHits, higgsHits, breezeHits)
+	}
+	if breezePath != "/run" {
+		t.Errorf("breeze path = %q, want /run", breezePath)
+	}
+	if breezeAuth != "Bearer shared-key" {
+		t.Errorf("breeze auth = %q, want the shared bearer token", breezeAuth)
+	}
+}
+
+// The completion Timbre pins for: delivery base64, inline audio_base64, and the
+// worker's own 24 kHz sample_rate carried through unconverted.
+func TestStatusBreezeReadsBase64Completion(t *testing.T) {
+	var gotPath string
+	breeze := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"breeze-9","status":"COMPLETED","delayTime":10,"executionTime":20,"output":{"delivery":"base64","audio_base64":"QUJD","size_bytes":3,"mode":"clone","cfg_scale":4.0,"sample_rate":24000,"duration_seconds":1.5}}`)
+	}))
+	defer breeze.Close()
+
+	client := New("", "k", WithBreezeEndpoint(breeze.URL), WithHTTPClient(breeze.Client()))
+	got, err := client.StatusBreeze(context.Background(), "breeze-9")
+	if err != nil {
+		t.Fatalf("StatusBreeze: %v", err)
+	}
+
+	if gotPath != "/status/breeze-9" {
+		t.Errorf("path = %q, want /status/breeze-9", gotPath)
+	}
+	if got.Output.Delivery != BreezeDeliveryBase64 {
+		t.Errorf("delivery = %q, want %s — anything else means the pin was ignored", got.Output.Delivery, BreezeDeliveryBase64)
+	}
+	if got.Output.AudioBase64 != "QUJD" {
+		t.Errorf("audio_base64 = %q, want QUJD", got.Output.AudioBase64)
+	}
+	if got.Output.SampleRate != 24000 {
+		t.Errorf("sample_rate = %d, want 24000 carried through unconverted", got.Output.SampleRate)
+	}
+	if got.Output.SizeBytes != 3 {
+		t.Errorf("size_bytes = %d, want 3", got.Output.SizeBytes)
+	}
+	if got.Output.Mode != BreezeModeClone {
+		t.Errorf("mode = %q, want clone echoed back", got.Output.Mode)
+	}
+	if got.Output.DurationSeconds != 1.5 {
+		t.Errorf("duration_seconds = %v, want 1.5", got.Output.DurationSeconds)
+	}
+	// Breeze sends no word_timings: alignment is the local aligner's job.
+	if got.Output.WordTimings != nil {
+		t.Errorf("WordTimings = %+v, want nil — Breeze has no native timings", got.Output.WordTimings)
+	}
+	// Breeze sends no format either; the poller's "wav" default applies.
+	if got.Output.Format != "" {
+		t.Errorf("format = %q, want empty", got.Output.Format)
+	}
+	if got.BreezeError() != nil {
+		t.Errorf("BreezeError = %v, want nil on a successful completion", got.BreezeError())
+	}
+}
+
+// A worker that answered s3 despite the pinned response_delivery must be
+// visible to the caller, not silently mistaken for missing audio.
+func TestStatusBreezeSurfacesS3Delivery(t *testing.T) {
+	breeze := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"b","status":"COMPLETED","output":{"delivery":"s3","audio_url":"https://example.invalid/x.wav","size_bytes":9,"sample_rate":24000,"url_expires_in":86400}}`)
+	}))
+	defer breeze.Close()
+
+	got, err := New("", "k", WithBreezeEndpoint(breeze.URL), WithHTTPClient(breeze.Client())).
+		StatusBreeze(context.Background(), "b")
+	if err != nil {
+		t.Fatalf("StatusBreeze: %v", err)
+	}
+	if got.Output.Delivery != "s3" {
+		t.Errorf("delivery = %q, want s3 so the caller can reject it explicitly", got.Output.Delivery)
+	}
+	if got.Output.AudioURL == "" {
+		t.Error("audio_url was dropped; the caller cannot report what the worker actually returned")
+	}
+	if got.Output.AudioBase64 != "" {
+		t.Error("an s3 delivery carries no inline audio")
+	}
+}
+
+// The worker's failure envelope, in both places it can land: RunPod's runtime
+// lifts a handler-returned "error" key to the top level, but the nested form is
+// parsed too rather than being lost.
+func TestBreezeErrorEnvelopeParsing(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantCode    string
+		wantField   string
+		wantMessage string
+	}{
+		{
+			name:        "top-level envelope",
+			body:        `{"id":"b1","status":"FAILED","error":{"code":"forbidden_field_for_mode","message":"reference_audio is not allowed in design mode","field":"reference_audio"}}`,
+			wantCode:    "forbidden_field_for_mode",
+			wantField:   "reference_audio",
+			wantMessage: "reference_audio is not allowed in design mode",
+		},
+		{
+			name:        "top-level envelope still wrapped",
+			body:        `{"id":"b2","status":"FAILED","error":{"error":{"code":"invalid_mode","message":"mode must be one of clone, design, direction","field":"mode"}}}`,
+			wantCode:    "invalid_mode",
+			wantField:   "mode",
+			wantMessage: "mode must be one of clone, design, direction",
+		},
+		{
+			name:        "nested in output",
+			body:        `{"id":"b3","status":"COMPLETED","output":{"error":{"code":"reference_audio_too_large","message":"reference audio exceeds 4194304 bytes","field":"reference_audio"}}}`,
+			wantCode:    "reference_audio_too_large",
+			wantField:   "reference_audio",
+			wantMessage: "reference audio exceeds 4194304 bytes",
+		},
+		{
+			name:        "field omitted when not field-scoped",
+			body:        `{"id":"b4","status":"FAILED","error":{"code":"invalid_payload","message":"input must be an object"}}`,
+			wantCode:    "invalid_payload",
+			wantMessage: "input must be an object",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			breeze := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer breeze.Close()
+
+			got, err := New("", "k", WithBreezeEndpoint(breeze.URL), WithHTTPClient(breeze.Client())).
+				StatusBreeze(context.Background(), "b")
+			if err != nil {
+				t.Fatalf("StatusBreeze: %v", err)
+			}
+			env := got.BreezeError()
+			if env == nil {
+				t.Fatal("BreezeError = nil, want the decoded envelope")
+			}
+			if env.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", env.Code, tc.wantCode)
+			}
+			if env.Field != tc.wantField {
+				t.Errorf("field = %q, want %q", env.Field, tc.wantField)
+			}
+			if env.Message != tc.wantMessage {
+				t.Errorf("message = %q, want %q", env.Message, tc.wantMessage)
+			}
+			// The rendered reason is what lands on the job row: it must name the
+			// code and never be empty.
+			if reason := env.Error(); !strings.Contains(reason, tc.wantCode) {
+				t.Errorf("Error() = %q, want it to name %q", reason, tc.wantCode)
+			}
+		})
+	}
+}
+
+// A plain-string RunPod error (a crashed worker, not a Breeze envelope) must
+// decode to nil rather than to an empty envelope that hides the real reason.
+func TestBreezeErrorIgnoresNonEnvelopeErrors(t *testing.T) {
+	breeze := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"b","status":"FAILED","error":"worker exited unexpectedly"}`)
+	}))
+	defer breeze.Close()
+
+	got, err := New("", "k", WithBreezeEndpoint(breeze.URL), WithHTTPClient(breeze.Client())).
+		StatusBreeze(context.Background(), "b")
+	if err != nil {
+		t.Fatalf("StatusBreeze: %v", err)
+	}
+	if env := got.BreezeError(); env != nil {
+		t.Errorf("BreezeError = %+v, want nil for a non-envelope error", env)
+	}
+	if got.ErrorString() != "worker exited unexpectedly" {
+		t.Errorf("ErrorString = %q, want the raw RunPod reason preserved", got.ErrorString())
 	}
 }

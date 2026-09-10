@@ -482,3 +482,56 @@ func TestMarkPollerFailed(t *testing.T) {
 		t.Errorf("Error = %q, want 'RunPod error'", got.Error)
 	}
 }
+
+// TestEnqueueBreezeDesignStoresNullVoice is the regression guard for a bug that
+// made design mode unusable: Enqueue exempted design from ErrNoVoice but still
+// bound Go's zero int64 into voice_id. With foreign_keys(1) enabled, SQLite only
+// exempts a NULL child key — 0 looks for a voices row with id=0 and fails the
+// constraint, so every design render died at INSERT with a bare HTTP 500.
+func TestEnqueueBreezeDesignStoresNullVoice(t *testing.T) {
+	store, userID, _ := newTestStore(t)
+	ctx := context.Background()
+
+	id, err := store.Enqueue(ctx, NewJob{
+		UserID: userID,
+		Text:   "a warm unhurried narrator",
+		Model:  BreezeModel,
+		Params: map[string]any{"mode": "design", "instruct": "warm, low, dry wit"},
+	})
+	if err != nil {
+		t.Fatalf("enqueue design job: %v", err)
+	}
+
+	var voiceID sql.Null[int64]
+	if err := store.db.QueryRowContext(ctx, `SELECT voice_id FROM jobs WHERE id = ?`, id).Scan(&voiceID); err != nil {
+		t.Fatalf("read back voice_id: %v", err)
+	}
+	if voiceID.Valid {
+		t.Errorf("design job stored voice_id = %d, want SQL NULL", voiceID.V)
+	}
+}
+
+// TestEnqueueStillRequiresVoiceForOtherEngines pins the exemption to Breeze
+// design alone — every other engine and mode must still be refused.
+func TestEnqueueStillRequiresVoiceForOtherEngines(t *testing.T) {
+	store, userID, _ := newTestStore(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		in   NewJob
+	}{
+		{"moss", NewJob{UserID: userID, Text: "hi"}},
+		{"higgs", NewJob{UserID: userID, Text: "hi", Model: HiggsModel}},
+		{"breeze clone", NewJob{UserID: userID, Text: "hi", Model: BreezeModel, Params: map[string]any{"mode": "clone"}}},
+		{"breeze direction", NewJob{UserID: userID, Text: "hi", Model: BreezeModel, Params: map[string]any{"mode": "direction"}}},
+		{"breeze no mode", NewJob{UserID: userID, Text: "hi", Model: BreezeModel}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.Enqueue(ctx, tc.in); !errors.Is(err, ErrNoVoice) {
+				t.Errorf("Enqueue without a voice = %v, want ErrNoVoice", err)
+			}
+		})
+	}
+}

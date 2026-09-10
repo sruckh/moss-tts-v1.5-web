@@ -136,11 +136,32 @@ func (h *harness) worker(client Submitter, maxInFlight int, opts ...Option) *Wor
 type fakeSubmitter struct {
 	mu          sync.Mutex
 	calls       int
-	inputs      []runpod.Input
-	higgsInputs []runpod.HiggsInput
-	id          string
-	status      string
-	err         error
+	inputs       []runpod.Input
+	higgsInputs  []runpod.HiggsInput
+	breezeInputs []runpod.BreezeInput
+	id           string
+	status       string
+	err          error
+}
+
+func (f *fakeSubmitter) SubmitBreeze(_ context.Context, in runpod.BreezeInput) (runpod.Submission, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	f.breezeInputs = append(f.breezeInputs, in)
+	if f.err != nil {
+		return runpod.Submission{}, f.err
+	}
+	id := f.id
+	if id == "" {
+		id = fmt.Sprintf("runpod-%d", f.calls)
+	}
+	status := f.status
+	if status == "" {
+		status = runpod.StatusInQueue
+	}
+	return runpod.Submission{ID: id, Status: status}, nil
 }
 
 func (f *fakeSubmitter) Submit(_ context.Context, in runpod.Input) (runpod.Submission, error) {
@@ -297,6 +318,269 @@ func TestSubmitRoutesMOSSJobToMossEndpoint(t *testing.T) {
 	}
 	if client.callCount() != 1 {
 		t.Errorf("Submit calls = %d, want 1", client.callCount())
+	}
+}
+
+// enqueueFull enqueues a job with an explicit model and params map — the shape
+// handleCreateJob produces after parseJobParams.
+func (h *harness) enqueueFull(t *testing.T, voiceID int64, text, model string, params map[string]any) int64 {
+	t.Helper()
+
+	id, err := h.jobs.Enqueue(context.Background(), jobs.NewJob{
+		UserID:  h.userID,
+		VoiceID: voiceID,
+		Text:    text,
+		Model:   model,
+		Params:  params,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	return id
+}
+
+// TestSubmitRoutesBreezeJobToBreezeEndpoint asserts the worker submits a Breeze
+// job through SubmitBreeze and never touches the MOSS or Higgs paths, and that
+// the captured BreezeInput carries the clone reference and its transcript. The
+// clone carries a stored transcript so the transcript gate passes.
+func TestSubmitRoutesBreezeJobToBreezeEndpoint(t *testing.T) {
+	h := newHarness(t)
+	if err := h.voices.SetReferenceTranscript(context.Background(), h.cloneID, "hello world"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	id := h.enqueueFull(t, h.cloneID, "hello", jobs.BreezeModel, map[string]any{"mode": "clone"})
+	client := &fakeSubmitter{id: "breeze-1"}
+
+	h.worker(client, 2).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Errorf("Status = %q, want %s", got.Status, jobs.StatusSubmitted)
+	}
+	if got.RunPodID != "breeze-1" {
+		t.Errorf("RunPodID = %q, want breeze-1", got.RunPodID)
+	}
+	if client.callCount() != 1 {
+		t.Errorf("total submit calls = %d, want 1", client.callCount())
+	}
+	if len(client.inputs) != 0 || len(client.higgsInputs) != 0 {
+		t.Errorf("MOSS/Higgs paths touched: inputs=%d higgsInputs=%d, want 0/0",
+			len(client.inputs), len(client.higgsInputs))
+	}
+	if len(client.breezeInputs) != 1 {
+		t.Fatalf("breezeInputs = %d, want 1", len(client.breezeInputs))
+	}
+	in := client.breezeInputs[0]
+	if in.Text != "hello" {
+		t.Errorf("breeze input text = %q, want %q", in.Text, "hello")
+	}
+	if in.Mode != runpod.BreezeModeClone {
+		t.Errorf("breeze input mode = %q, want %q", in.Mode, runpod.BreezeModeClone)
+	}
+	if len(in.References) != 1 {
+		t.Errorf("breeze references = %d, want 1", len(in.References))
+	}
+	if in.ReferenceText != "hello world" {
+		t.Errorf("breeze reference text = %q, want the stored transcript", in.ReferenceText)
+	}
+	if in.Instruct != "" {
+		t.Errorf("breeze instruct = %q, want empty for clone mode", in.Instruct)
+	}
+}
+
+// TestBreezeDirectionCarriesInstruction asserts direction mode attaches the
+// clone reference and transcript like clone mode, plus the instruction.
+func TestBreezeDirectionCarriesInstruction(t *testing.T) {
+	h := newHarness(t)
+	if err := h.voices.SetReferenceTranscript(context.Background(), h.cloneID, "hello world"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	id := h.enqueueFull(t, h.cloneID, "hello", jobs.BreezeModel,
+		map[string]any{"mode": "direction", "instruct": "cheerful", "cfg_scale": 4.0})
+	client := &fakeSubmitter{}
+
+	h.worker(client, 2).Tick(context.Background())
+
+	if got := h.get(t, id); got.Status != jobs.StatusSubmitted {
+		t.Fatalf("Status = %q, want %s", got.Status, jobs.StatusSubmitted)
+	}
+	if len(client.breezeInputs) != 1 {
+		t.Fatalf("breezeInputs = %d, want 1", len(client.breezeInputs))
+	}
+	in := client.breezeInputs[0]
+	if in.Mode != runpod.BreezeModeDirection {
+		t.Errorf("mode = %q, want %q", in.Mode, runpod.BreezeModeDirection)
+	}
+	if in.Instruct != "cheerful" {
+		t.Errorf("instruct = %q, want %q", in.Instruct, "cheerful")
+	}
+	if in.CfgScale != 4.0 {
+		t.Errorf("cfg_scale = %v, want 4.0", in.CfgScale)
+	}
+	if len(in.References) != 1 || in.ReferenceText != "hello world" {
+		t.Errorf("references = %d, text = %q — direction keeps the clone reference",
+			len(in.References), in.ReferenceText)
+	}
+}
+
+// TestBreezeDesignCarriesNoReference asserts design mode renders from the
+// instruction alone: no voice is enqueued, the transcript gate is bypassed,
+// and the BreezeInput carries no reference even when the job somehow names a
+// voice (the compose card's library stays visible, so a design request naming
+// a voice is possible and must be ignored, not honored).
+func TestBreezeDesignCarriesNoReference(t *testing.T) {
+	h := newHarness(t)
+	params := map[string]any{"mode": "design", "instruct": "a warm narrator", "cfg_scale": 4.0}
+
+	for _, tc := range []struct {
+		name    string
+		voiceID int64
+	}{
+		{"no voice", 0},
+		{"names a voice anyway", h.cloneID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := h.enqueueFull(t, tc.voiceID, "hello", jobs.BreezeModel, params)
+			// Distinct ids per subtest: jobs.runpod_id is uniquely indexed.
+			client := &fakeSubmitter{id: "breeze-design-" + tc.name}
+
+			h.worker(client, 2).Tick(context.Background())
+
+			if got := h.get(t, id); got.Status != jobs.StatusSubmitted {
+				t.Fatalf("Status = %q, want %s (error %q)", got.Status, jobs.StatusSubmitted, got.Error)
+			}
+			if len(client.breezeInputs) != 1 {
+				t.Fatalf("breezeInputs = %d, want 1", len(client.breezeInputs))
+			}
+			in := client.breezeInputs[0]
+			if in.Mode != runpod.BreezeModeDesign {
+				t.Errorf("mode = %q, want %q", in.Mode, runpod.BreezeModeDesign)
+			}
+			if in.Instruct != "a warm narrator" {
+				t.Errorf("instruct = %q, want %q", in.Instruct, "a warm narrator")
+			}
+			if len(in.References) != 0 || in.ReferenceText != "" {
+				t.Errorf("design carried reference audio %d clips / text %q, want none — the worker rejects one outright",
+					len(in.References), in.ReferenceText)
+			}
+		})
+	}
+}
+
+// TestBuildBreezeInputValidationErrors pins the builder's own defenses against
+// jobs that should never have been enqueued: the handler 400s these, but a row
+// written by any other path must still fail here rather than reach RunPod.
+// TestBuildBreezeInputValidationErrors pins the builder's own defenses against
+// jobs that should never have been enqueued: the handler 400s these, but a row
+// written by any other path must still fail here rather than reach RunPod. The
+// jobs are constructed directly because the store's Enqueue validation rightly
+// refuses several of these shapes (a clone render with no voice, say).
+func TestBuildBreezeInputValidationErrors(t *testing.T) {
+	h := newHarness(t)
+	if err := h.voices.SetReferenceTranscript(context.Background(), h.cloneID, "hello world"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	w := h.worker(&fakeSubmitter{}, 1)
+
+	jobWith := func(voiceID int64, paramsJSON string) jobs.Job {
+		return jobs.Job{UserID: h.userID, VoiceID: voiceID, Text: "hi", Model: jobs.BreezeModel, ParamsJSON: paramsJSON}
+	}
+
+	tests := []struct {
+		name    string
+		job     jobs.Job
+		wantErr string
+	}{
+		{"missing mode", jobWith(h.cloneID, ""), "explicit mode"},
+		{"unknown mode", jobWith(h.cloneID, `{"mode":"weave"}`), `unknown breeze mode "weave"`},
+		{"design without instruct", jobWith(0, `{"mode":"design"}`), "design mode requires an instruction"},
+		{"direction without instruct", jobWith(h.cloneID, `{"mode":"direction"}`), "direction mode requires an instruction"},
+		{"clone without voice", jobWith(0, `{"mode":"clone"}`), "requires a cloned reference voice"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := w.buildBreezeInput(context.Background(), tc.job)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want one containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBuildBreezeInputRequiresTranscript asserts clone and direction fail when
+// the named voice has no stored transcript. Uses a second clone with no
+// transcript so the case is the builder's check, not the lazy-recovery gate.
+func TestBuildBreezeInputRequiresTranscript(t *testing.T) {
+	h := newHarness(t)
+	w := h.worker(&fakeSubmitter{}, 1)
+
+	for _, mode := range []string{runpod.BreezeModeClone, runpod.BreezeModeDirection} {
+		t.Run(mode, func(t *testing.T) {
+			params := map[string]any{"mode": mode}
+			if mode == runpod.BreezeModeDirection {
+				params["instruct"] = "brisk"
+			}
+			id := h.enqueueFull(t, h.cloneID, "hi", jobs.BreezeModel, params)
+			_, err := w.buildBreezeInput(context.Background(), h.get(t, id))
+			if err == nil || !strings.Contains(err.Error(), "no reference transcript") {
+				t.Errorf("err = %v, want a missing-transcript error", err)
+			}
+		})
+	}
+}
+
+// TestBuildBreezeInputRejectsOversizeReference asserts the decoded-byte cap is
+// enforced before anything is encoded or sent, surfacing the runpod package's
+// own validation error.
+func TestBuildBreezeInputRejectsOversizeReference(t *testing.T) {
+	h := newHarness(t)
+	oversize := make([]byte, (4<<20)+1)
+	voiceID, err := h.voices.CreateCloned(context.Background(), h.userID, "Big", ".wav", oversize)
+	if err != nil {
+		t.Fatalf("CreateCloned: %v", err)
+	}
+	if err := h.voices.SetReferenceTranscript(context.Background(), voiceID, "words"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	id := h.enqueueFull(t, voiceID, "hi", jobs.BreezeModel, map[string]any{"mode": "clone"})
+
+	w := h.worker(&fakeSubmitter{}, 1)
+	_, err = w.buildBreezeInput(context.Background(), h.get(t, id))
+
+	var valErr *runpod.BreezeValidationError
+	if !errors.As(err, &valErr) {
+		t.Errorf("err = %v, want a *runpod.BreezeValidationError", err)
+	}
+}
+
+// TestBuildInputExtraCarriesStoredParamsVerbatim is the outbound half of the
+// D2 regression contract: buildInput forwards params_json as Extra unchanged,
+// so a MOSS or Higgs row stored without Breeze fields (the server strips them)
+// reaches the worker as exactly today's payload — no mode, instruct, or
+// cfg_scale can appear unless the row itself carries them.
+func TestBuildInputExtraCarriesStoredParamsVerbatim(t *testing.T) {
+	h := newHarness(t)
+	h.enqueueFull(t, h.stockID, "hi", jobs.DefaultModel,
+		map[string]any{"seed": 7, "pace": 1.5})
+	client := &fakeSubmitter{}
+
+	h.worker(client, 2).Tick(context.Background())
+
+	if len(client.inputs) != 1 {
+		t.Fatalf("inputs = %d, want 1", len(client.inputs))
+	}
+	extra := client.inputs[0].Extra
+	if len(extra) != 2 {
+		t.Fatalf("Extra = %v, want exactly the two stored params", extra)
+	}
+	if extra["seed"] != float64(7) || extra["pace"] != 1.5 {
+		t.Errorf("Extra = %v, want seed=7 pace=1.5", extra)
+	}
+	for _, leaked := range []string{"mode", "instruct", "cfg_scale"} {
+		if _, ok := extra[leaked]; ok {
+			t.Errorf("Extra carries %q — Breeze-only fields must never reach the MOSS worker", leaked)
+		}
 	}
 }
 

@@ -36,11 +36,13 @@ const MaxTextRunes = 5000
 const MaxLanguageLen = 64
 
 // DefaultModel is the backwards-compatible engine selected when a browser or
-// API caller omits model. HiggsModel is the only alternate engine exposed by
-// the studio; both values are stored verbatim in jobs.model for attribution.
+// API caller omits model. HiggsModel and BreezeModel are the alternate engines
+// exposed by the studio; every value is stored verbatim in jobs.model for
+// attribution. BreezeModel must stay identical to runpod.BreezeModel.
 const (
 	DefaultModel = "MOSS-TTS v1.5"
 	HiggsModel   = "bosonai/higgs-tts-3-4b"
+	BreezeModel  = "BreezeBlue/Breeze-TTS-2"
 )
 
 // Validation failures from Enqueue. The handler maps each to a 400 with the
@@ -133,20 +135,33 @@ type NewJob struct {
 // answers IN_QUEUE to a fresh submission and, on a warm worker, occasionally
 // IN_PROGRESS already; anything unexpected is recorded as submitted, since the
 // job demonstrably reached RunPod.
-// ResolveModel accepts the two engines exposed by the studio. Blank input keeps
-// existing clients on MOSS; Store.Enqueue remains intentionally permissive for
-// internal callers that need to retain historical or future model attribution.
+// ResolveModel accepts the three engines exposed by the studio. Blank input
+// keeps existing clients on MOSS; Store.Enqueue remains intentionally permissive
+// for internal callers that need to retain historical or future model
+// attribution. Adding an engine widens this allowlist and changes nothing else:
+// blank still resolves to MOSS and an unknown value still returns ErrModel.
 func ResolveModel(model string) (string, error) {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return DefaultModel, nil
 	}
 	switch model {
-	case DefaultModel, HiggsModel:
+	case DefaultModel, HiggsModel, BreezeModel:
 		return model, nil
 	default:
 		return "", ErrModel
 	}
+}
+
+// isBreezeDesign reports whether a job is a Breeze design render — the one
+// combination that legitimately carries no voice link. Kept here rather than in
+// the handler so every enqueue path agrees on the exemption.
+func isBreezeDesign(model string, params map[string]any) bool {
+	if model != BreezeModel {
+		return false
+	}
+	mode, _ := params["mode"].(string)
+	return strings.TrimSpace(mode) == "design"
 }
 
 func StatusForRunPod(runpodStatus string) string {
@@ -160,6 +175,12 @@ func StatusForRunPod(runpodStatus string) string {
 // than the default MOSS path. It is the single source of truth for routing a
 // job to the correct RunPod endpoint on both submit and poll.
 func (j Job) IsHiggs() bool { return j.Model == HiggsModel }
+
+// IsBreeze reports whether this job targets the Breeze TTS 2 engine endpoint.
+// Like IsHiggs it is the single source of truth for routing a job to the
+// correct RunPod endpoint on both submit and poll. The two are mutually
+// exclusive: a job carries exactly one model string.
+func (j Job) IsBreeze() bool { return j.Model == BreezeModel }
 
 // Store is the jobs data access object.
 type Store struct {
@@ -200,7 +221,11 @@ func (s *Store) Enqueue(ctx context.Context, in NewJob) (int64, error) {
 	if len(language) > MaxLanguageLen {
 		return 0, ErrLanguage
 	}
-	if in.VoiceID <= 0 {
+	// Every engine renders from a voice except Breeze's design mode, which
+	// builds one from a written instruction and has no reference to attach.
+	// The column is nullable and ON DELETE SET NULL, so a NULL link is a shape
+	// every read path already handles.
+	if in.VoiceID <= 0 && !isBreezeDesign(in.Model, in.Params) {
 		return 0, ErrNoVoice
 	}
 
@@ -223,10 +248,19 @@ func (s *Store) Enqueue(ctx context.Context, in NewJob) (int64, error) {
 		model = DefaultModel
 	}
 
+	// voice_id is a foreign key into voices with foreign_keys(1) enabled, so an
+	// absent voice must be SQL NULL. Binding Go's zero int64 would look for a
+	// voices row with id=0 and fail the constraint — the exact way a Breeze
+	// design render (which legitimately has no voice) would die at INSERT.
+	var voiceValue sql.Null[int64]
+	if in.VoiceID > 0 {
+		voiceValue = sql.Null[int64]{V: in.VoiceID, Valid: true}
+	}
+
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (user_id, voice_id, text, language, params_json, model, status)
 		VALUES (?, ?, ?, ?, ?, ?, 'queued')`,
-		in.UserID, in.VoiceID, text, languageValue, params, model)
+		in.UserID, voiceValue, text, languageValue, params, model)
 	if err != nil {
 		return 0, fmt.Errorf("enqueue job: %w", err)
 	}

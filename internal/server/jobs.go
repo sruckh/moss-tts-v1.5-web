@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/voices"
 	"github.com/sruckh/timbre/internal/web"
 )
@@ -113,42 +114,71 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	voiceID, err := strconv.ParseInt(strings.TrimSpace(r.PostFormValue("voice_id")), 10, 64)
-	if err != nil || voiceID <= 0 {
-		http.Error(w, jobs.ErrNoVoice.Error(), http.StatusBadRequest)
-		return
-	}
-	// The voice must exist: a job pinned to a phantom id would only fail later,
-	// in the worker, where the user never sees why.
-	v, err := s.voices.Get(r.Context(), voiceID)
-	if err != nil {
-		if errors.Is(err, voices.ErrNotFound) {
-			http.Error(w, "that voice no longer exists", http.StatusBadRequest)
-			return
-		}
-		serverError(w, r, err)
-		return
-	}
-	accessible, err := s.voices.IsAccessibleToUser(r.Context(), v.ID, userID)
-	if err != nil {
-		serverError(w, r, err)
-		return
-	}
-	if !accessible {
-		http.Error(w, "you do not have access to that voice", http.StatusForbidden)
-		return
-	}
-
+	// Engine and parameters are resolved before the voice, because Breeze's
+	// design mode is the one render that legitimately posts no voice_id at all:
+	// the compose card disables that input. Validating the voice first would 400
+	// that request before anything could know it was allowed to omit one.
+	// The voice library section itself stays visible in design mode, so a
+	// design request naming a voice is still possible and is handled here
+	// rather than assumed away.
 	model, err := jobs.ResolveModel(r.PostFormValue("model"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	params, err := parseJobParams(r)
+	params, err := parseJobParams(r, model)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	designRender := false
+	if model == jobs.BreezeModel {
+		mode, _ := params["mode"].(string)
+		if mode == "" {
+			http.Error(w, "select a Breeze mode: clone, design or direction", http.StatusBadRequest)
+			return
+		}
+		if mode == runpod.BreezeModeDesign || mode == runpod.BreezeModeDirection {
+			if _, ok := params["instruct"].(string); !ok {
+				http.Error(w, "Breeze "+mode+" mode needs a voice instruction", http.StatusBadRequest)
+				return
+			}
+		}
+		// Design renders from the instruction alone and the worker rejects a
+		// reference outright, so the job records no voice link — the
+		// instruction is the voice identity.
+		designRender = mode == runpod.BreezeModeDesign
+	}
+
+	var voiceID int64
+	if !designRender {
+		voiceID, err = strconv.ParseInt(strings.TrimSpace(r.PostFormValue("voice_id")), 10, 64)
+		if err != nil || voiceID <= 0 {
+			http.Error(w, jobs.ErrNoVoice.Error(), http.StatusBadRequest)
+			return
+		}
+		// The voice must exist: a job pinned to a phantom id would only fail
+		// later, in the worker, where the user never sees why.
+		v, err := s.voices.Get(r.Context(), voiceID)
+		if err != nil {
+			if errors.Is(err, voices.ErrNotFound) {
+				http.Error(w, "that voice no longer exists", http.StatusBadRequest)
+				return
+			}
+			serverError(w, r, err)
+			return
+		}
+		accessible, err := s.voices.IsAccessibleToUser(r.Context(), v.ID, userID)
+		if err != nil {
+			serverError(w, r, err)
+			return
+		}
+		if !accessible {
+			http.Error(w, "you do not have access to that voice", http.StatusForbidden)
+			return
+		}
 	}
 
 	id, err := s.jobs.Enqueue(r.Context(), jobs.NewJob{
@@ -275,8 +305,41 @@ func audioDurations(items []jobs.Job) map[int64]string {
 // parameter fields — seed, pace, pitch, expressiveness and the output toggles —
 // all land here; every one is validated so a bad value answers 400 rather than
 // silently reaching the endpoint.
-func parseJobParams(r *http.Request) (map[string]any, error) {
+func parseJobParams(r *http.Request, model string) (map[string]any, error) {
 	params := map[string]any{}
+
+	// Breeze-only fields, read ONLY for Breeze. The studio hides these controls
+	// with x-show, which sets display:none and still submits them — so a MOSS or
+	// Higgs render posts mode=clone and cfg_scale=4 whether or not anyone
+	// touched them. Storing those would put them in params_json, and buildInput
+	// forwards params_json to the worker as Extra, silently changing what MOSS
+	// receives. Gating on the engine keeps the regression contract: a MOSS or
+	// Higgs request with today's exact fields produces today's exact payload.
+	if model == jobs.BreezeModel {
+		if raw := strings.TrimSpace(r.PostFormValue("mode")); raw != "" {
+			switch raw {
+			case runpod.BreezeModeClone, runpod.BreezeModeDesign, runpod.BreezeModeDirection:
+				params["mode"] = raw
+			default:
+				return nil, errors.New("mode must be clone, design or direction")
+			}
+		}
+
+		if raw := strings.TrimSpace(r.PostFormValue("instruct")); raw != "" {
+			params["instruct"] = raw
+		}
+
+		// The worker coerces cfg_scale with float() and rejects only
+		// non-numerics, so there is no worker-side range to mirror here. Any
+		// bound Timbre adds would be a Timbre choice presented as a worker limit.
+		if raw := strings.TrimSpace(r.PostFormValue("cfg_scale")); raw != "" {
+			cfg, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return nil, errors.New("cfg_scale must be a number")
+			}
+			params["cfg_scale"] = cfg
+		}
+	}
 
 	if raw := strings.TrimSpace(r.PostFormValue("max_new_tokens")); raw != "" {
 		tokens, err := strconv.Atoi(raw)

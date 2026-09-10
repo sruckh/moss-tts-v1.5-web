@@ -97,9 +97,12 @@ templ Compose(available []voices.Voice, selectedID int64) {
 		hx-target="#queue"
 		hx-swap="outerHTML"
 		class="flex flex-col gap-6 rounded-container border border-line bg-surface-1 p-6"
-		x-data="{ script: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
+		x-data="{ script: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, engine: '', mode: 'clone', get isBreeze() { return this.engine === $refs.breezeModel.value }, get needsInstruct() { return this.isBreeze &amp;&amp; (this.mode === 'design' || this.mode === 'direction') }, get needsVoice() { return !this.isBreeze || this.mode !== 'design' }, tag(t) { this.script = this.script + t }, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
 	>
-		<input type="hidden" id="voice_id" name="voice_id" value={ strconv.FormatInt(selectedID, 10) }/>
+		// Disabled inputs are not submitted, so design mode posts no voice_id at
+		// all — the worker rejects a reference in design and the job stores no
+		// voice link. The handler resolves mode before requiring a voice.
+		<input type="hidden" id="voice_id" name="voice_id" value={ strconv.FormatInt(selectedID, 10) } x-bind:disabled="!needsVoice"/>
 		<div>
 			<label class="field-label" for="script">Script</label>
 			<textarea
@@ -130,11 +133,63 @@ templ Compose(available []voices.Voice, selectedID int64) {
 					id="model"
 					name="model"
 					aria-label="Speech engine"
+					x-model="engine"
 				>
 					<option value={ jobs.DefaultModel } selected>MOSS-TTS v1.5</option>
 					<option value={ jobs.HiggsModel }>Higgs TTS 3.4B</option>
+					<option x-ref="breezeModel" value={ jobs.BreezeModel }>Breeze TTS 2</option>
 				</select>
-				<p class="help">MOSS is the default. Higgs uses a cloned voice's stored reference transcript and recovers it in the background when needed.</p>
+				<p class="help">MOSS is the default. Higgs uses a cloned voice's stored reference transcript and recovers it in the background when needed. Breeze adds voice design and direction, and is a queued render like the others — not streaming.</p>
+			</div>
+			<div x-show="isBreeze" x-cloak>
+				<label class="field-label" for="mode">Breeze mode</label>
+				<select
+					class="input focus:ring-2 focus:ring-indigo"
+					id="mode"
+					name="mode"
+					aria-label="Breeze synthesis mode"
+					x-model="mode"
+				>
+					<option value="clone">Clone — copy a reference voice</option>
+					<option value="design">Design — build a voice from a description</option>
+					<option value="direction">Direction — clone, then steer the delivery</option>
+				</select>
+				<p class="help" x-text="mode === 'design' ? 'Design needs no reference voice — the description is the voice.' : 'Uses the selected voice and its stored reference transcript.'"></p>
+			</div>
+			<div x-show="needsInstruct" x-cloak class="sm:col-span-2">
+				<label class="field-label" for="instruct">Voice instruction</label>
+				<textarea
+					class="input"
+					id="instruct"
+					name="instruct"
+					rows="2"
+					aria-label="Natural-language voice instruction"
+					placeholder="A warm, unhurried narrator with a low voice and a dry wit."
+				></textarea>
+				<p class="help">Plain language. Describes the voice for design, or how to steer the cloned speaker for direction.</p>
+			</div>
+			<div x-show="isBreeze" x-cloak>
+				<label class="field-label" for="cfg_scale">Guidance (cfg_scale)</label>
+				<input class="input" id="cfg_scale" name="cfg_scale" value="4" inputmode="decimal" aria-label="Guidance scale"/>
+				<p class="help">The worker's default is 4. Higher follows the instruction more literally.</p>
+			</div>
+			<div x-show="isBreeze" x-cloak class="sm:col-span-2">
+				<span class="field-label">Vocal events</span>
+				<div class="flex flex-wrap gap-2">
+					for _, cue := range []string{ "(laugh)", "(sigh)", "(cough)", "(clears throat)" } {
+						<button
+							type="button"
+							class="btn btn-ghost"
+							aria-label={ "Insert " + cue }
+							x-on:click={ "tag(' " + cue + " ')" }
+						>{ cue }</button>
+					}
+				</div>
+				<p class="help">Inserted into the script as-is. Your text is never rewritten. Chinese cues use square brackets — 
+					[笑]
+					, 
+					[叹气]
+					.</p>
 			</div>
 			<div>
 				<label class="field-label" for="seed">Seed</label>

@@ -47,9 +47,10 @@ const maxErrorBody = 2 << 10
 // changing something cannot help, so the worker fails the job immediately
 // instead of spinning.
 var (
-	ErrNoEndpoint      = errors.New("runpod: no endpoint configured (set RUNPOD_ENDPOINT)")
-	ErrNoHiggsEndpoint = errors.New("runpod: no Higgs endpoint configured (set HIGGS_RUNPOD_ENDPOINT)")
-	ErrNoAPIKey        = errors.New("runpod: no API key configured (set RUNPOD_API_KEY)")
+	ErrNoEndpoint       = errors.New("runpod: no endpoint configured (set RUNPOD_ENDPOINT)")
+	ErrNoHiggsEndpoint  = errors.New("runpod: no Higgs endpoint configured (set HIGGS_RUNPOD_ENDPOINT)")
+	ErrNoBreezeEndpoint = errors.New("runpod: no Breeze endpoint configured (set BREEZE_RUNPOD_ENDPOINT)")
+	ErrNoAPIKey         = errors.New("runpod: no API key configured (set RUNPOD_API_KEY)")
 )
 
 // Error is a non-2xx response from RunPod.
@@ -102,9 +103,22 @@ type HiggsValidationError struct {
 
 func (e *HiggsValidationError) Error() string { return "runpod: " + e.Reason }
 
+// BreezeValidationError reports a Breeze payload that the worker's own schema
+// validator would reject before any network call is made: an empty script, an
+// unknown mode, a mode-matrix violation (a design job carrying a reference, a
+// clone job missing its transcript), or a reference over the decoded size
+// limit. Always permanent — retrying an identical rejected payload cannot
+// succeed.
+type BreezeValidationError struct {
+	Reason string
+}
+
+func (e *BreezeValidationError) Error() string { return "runpod: " + e.Reason }
+
 // IsPermanent reports whether err is a failure that retrying cannot fix.
 func IsPermanent(err error) bool {
-	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoHiggsEndpoint) || errors.Is(err, ErrNoAPIKey) {
+	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoHiggsEndpoint) ||
+		errors.Is(err, ErrNoBreezeEndpoint) || errors.Is(err, ErrNoAPIKey) {
 		return true
 	}
 	var apiErr *Error
@@ -117,6 +131,10 @@ func IsPermanent(err error) bool {
 	}
 	var valErr *HiggsValidationError
 	if errors.As(err, &valErr) {
+		return true
+	}
+	var breezeValErr *BreezeValidationError
+	if errors.As(err, &breezeValErr) {
 		return true
 	}
 	return false
@@ -297,6 +315,221 @@ func ValidateHiggsReferences(refs []HiggsReference) error {
 	return nil
 }
 
+// BreezeModel is the RunPod model identifier for the Breeze TTS 2 engine
+// (BreezeBlue/Breeze-TTS-2), recorded verbatim in jobs.model.
+const BreezeModel = "BreezeBlue/Breeze-TTS-2"
+
+// The three Breeze generation modes (schema_validator.py VALID_MODES). Timbre
+// always sends `mode` explicitly and never relies on the worker's inference
+// rules: the three modes do not share input requirements, and an inferred mode
+// would silently change which fields the worker demands.
+const (
+	// BreezeModeClone renders the script in a cloned voice: reference audio
+	// plus that reference's transcript.
+	BreezeModeClone = "clone"
+
+	// BreezeModeDesign renders the script from an instruction alone. The worker
+	// REJECTS a design request that carries reference_audio
+	// (forbidden_field_for_mode), so a design job carries no reference at all.
+	BreezeModeDesign = "design"
+
+	// BreezeModeDirection is clone plus an instruction: reference audio, that
+	// reference's transcript, and the instruction.
+	BreezeModeDirection = "direction"
+)
+
+// BreezeDeliveryBase64 is the only delivery Timbre accepts: it is pinned as
+// `response_delivery` on every request and expected back as `delivery` on every
+// completion.
+//
+// The worker's own default is `auto`, which resolves to a presigned B2 URL when
+// the deployment has credentials and to inline base64 when it does not — a
+// worker-side deployment change would otherwise silently flip Timbre between
+// two completion paths. Pinning base64 reuses the poller's existing
+// audio_base64 decode path exactly and adds no outbound dependency, no expiry
+// race and no second timeout surface. It is deliberately not a field on
+// BreezeInput: nothing in Timbre may opt a job out of it.
+const BreezeDeliveryBase64 = "base64"
+
+// breezeDefaultCfgScale is the worker's own cfg_scale default. Timbre sends the
+// resolved value rather than omitting the key, so the payload always records
+// what the render actually used. The worker enforces no range — any float it
+// can coerce passes — so a UI range is Timbre's choice, not a worker limit.
+const breezeDefaultCfgScale = 4.0
+
+// Breeze worker limits (sruckh/breezetts-runpod schema_validator.py:10-11):
+// 4 MiB decoded audio per reference clip, 6 MiB decoded across all clips. The
+// worker checks DECODED bytes, not base64 length, so SubmitBreeze validates the
+// raw bytes before encoding — failing fast with a clear message instead of
+// shipping ~5.6 MiB of base64 to be rejected upstream. There is no clip-count
+// cap in the Breeze worker; only these two byte limits.
+const (
+	breezeMaxReferenceBytes = 4 << 20 // 4 MiB, decoded (pre-base64), per clip
+	breezeMaxTotalBytes     = 6 << 20 // 6 MiB, decoded (pre-base64), all clips
+)
+
+// BreezeReference is one reference clip attached to a clone or direction
+// request. Audio is the raw decoded bytes — SubmitBreeze base64-encodes them,
+// the caller never pre-encodes.
+//
+// Unlike HiggsReference there is no per-clip text or format: the Breeze worker
+// takes one top-level reference_text for the whole request and infers the
+// container itself.
+type BreezeReference struct {
+	Audio []byte
+}
+
+// BreezeInput is the `input` object of a Breeze submission.
+//
+// Which fields are sent is a function of Mode alone — see MarshalJSON. The
+// struct carries no ResponseDelivery field on purpose (see
+// breezeResponseDelivery).
+type BreezeInput struct {
+	// Text is the script to render. Required in every mode, non-empty.
+	// Inline vocal events — (laugh) / [笑] — travel here untouched; Timbre
+	// never rewrites user text.
+	Text string
+
+	// Mode is one of BreezeModeClone, BreezeModeDesign, BreezeModeDirection.
+	// Always sent explicitly; an empty or unknown value is a caller bug and is
+	// rejected rather than inferred.
+	Mode string
+
+	// References are the reference clips for clone and direction. Forbidden in
+	// design mode — the worker rejects the request outright.
+	References []BreezeReference
+
+	// ReferenceText is the transcript of the reference audio, sent as the
+	// worker's top-level `reference_text`. Required for clone and direction.
+	ReferenceText string
+
+	// Instruct is the natural-language voice instruction. Required for design
+	// and direction; ignored by the worker in clone mode and therefore not sent
+	// there.
+	Instruct string
+
+	// CfgScale is the guidance scale. Zero resolves to breezeDefaultCfgScale —
+	// there is no caller-meaningful use of exactly 0.
+	CfgScale float64
+}
+
+// MarshalJSON renders the Breeze input object per the mode matrix
+// (schema_validator.py:120). The payload shape is derived from Mode rather than
+// from which fields happen to be populated, so a design request can never carry
+// reference_audio even if a caller left references attached.
+func (in BreezeInput) MarshalJSON() ([]byte, error) {
+	cfgScale := in.CfgScale
+	if cfgScale == 0 {
+		cfgScale = breezeDefaultCfgScale
+	}
+
+	payload := map[string]any{
+		"text":              in.Text,
+		"mode":              in.Mode,
+		"cfg_scale":         cfgScale,
+		"response_delivery": BreezeDeliveryBase64,
+	}
+	switch in.Mode {
+	case BreezeModeClone:
+		payload["reference_audio"] = encodeBreezeReferences(in.References)
+		payload["reference_text"] = in.ReferenceText
+	case BreezeModeDirection:
+		payload["reference_audio"] = encodeBreezeReferences(in.References)
+		payload["reference_text"] = in.ReferenceText
+		payload["instruct"] = in.Instruct
+	case BreezeModeDesign:
+		payload["instruct"] = in.Instruct
+	default:
+		return nil, &BreezeValidationError{Reason: breezeUnknownModeReason(in.Mode)}
+	}
+	return json.Marshal(payload)
+}
+
+// encodeBreezeReferences base64-encodes each clip. The worker accepts a bare
+// string or an array; Timbre always sends the array form, which is the same
+// shape for one clip and for many and is the form the total-bytes limit is
+// written against.
+func encodeBreezeReferences(refs []BreezeReference) []string {
+	encoded := make([]string, len(refs))
+	for i, ref := range refs {
+		encoded[i] = base64.StdEncoding.EncodeToString(ref.Audio)
+	}
+	return encoded
+}
+
+func breezeUnknownModeReason(mode string) string {
+	return fmt.Sprintf("unknown breeze mode %q (want %s, %s or %s)",
+		mode, BreezeModeClone, BreezeModeDesign, BreezeModeDirection)
+}
+
+// ValidateBreezeReferences enforces the Breeze worker's decoded-byte limits
+// (breezeMaxReferenceBytes, breezeMaxTotalBytes) before anything is encoded or
+// sent. Timbre's upload cap is 10 MB — wider than the worker's 4 MiB per clip —
+// so an accepted upload can still be rejected here, with a specific reason,
+// exactly as it is for Higgs today.
+func ValidateBreezeReferences(refs []BreezeReference) error {
+	var total int
+	for i, ref := range refs {
+		if len(ref.Audio) > breezeMaxReferenceBytes {
+			return &BreezeValidationError{
+				Reason: fmt.Sprintf("reference %d is %d bytes decoded (max %d)", i, len(ref.Audio), breezeMaxReferenceBytes),
+			}
+		}
+		if len(ref.Audio) == 0 {
+			return &BreezeValidationError{Reason: fmt.Sprintf("reference %d is empty", i)}
+		}
+		total += len(ref.Audio)
+	}
+	if total > breezeMaxTotalBytes {
+		return &BreezeValidationError{
+			Reason: fmt.Sprintf("total reference audio is %d bytes decoded (max %d)", total, breezeMaxTotalBytes),
+		}
+	}
+	return nil
+}
+
+// ValidateBreezeInput enforces everything the worker's schema validator would
+// reject, before a request is spent finding out: a non-empty script
+// (missing_required_field), a known mode (invalid_mode), the per-mode field
+// matrix (missing_required_field / forbidden_field_for_mode) and the reference
+// byte limits (reference_audio_too_large / reference_audio_total_too_large).
+func ValidateBreezeInput(in BreezeInput) error {
+	if strings.TrimSpace(in.Text) == "" {
+		return &BreezeValidationError{Reason: "breeze request has no text"}
+	}
+
+	switch in.Mode {
+	case BreezeModeClone:
+		if len(in.References) == 0 {
+			return &BreezeValidationError{Reason: "breeze clone mode requires reference audio"}
+		}
+		if strings.TrimSpace(in.ReferenceText) == "" {
+			return &BreezeValidationError{Reason: "breeze clone mode requires reference_text (the reference transcript)"}
+		}
+	case BreezeModeDirection:
+		if len(in.References) == 0 {
+			return &BreezeValidationError{Reason: "breeze direction mode requires reference audio"}
+		}
+		if strings.TrimSpace(in.ReferenceText) == "" {
+			return &BreezeValidationError{Reason: "breeze direction mode requires reference_text (the reference transcript)"}
+		}
+		if strings.TrimSpace(in.Instruct) == "" {
+			return &BreezeValidationError{Reason: "breeze direction mode requires instruct"}
+		}
+	case BreezeModeDesign:
+		if len(in.References) > 0 {
+			return &BreezeValidationError{Reason: "breeze design mode forbids reference audio (the worker rejects it as forbidden_field_for_mode)"}
+		}
+		if strings.TrimSpace(in.Instruct) == "" {
+			return &BreezeValidationError{Reason: "breeze design mode requires instruct"}
+		}
+	default:
+		return &BreezeValidationError{Reason: breezeUnknownModeReason(in.Mode)}
+	}
+
+	return ValidateBreezeReferences(in.References)
+}
+
 // Submission is the response to POST /run.
 type Submission struct {
 	ID     string `json:"id"`
@@ -323,14 +556,16 @@ type Health struct {
 
 // Client talks to one serverless endpoint.
 type Client struct {
-	// mossEndpoint and higgsEndpoint are two separately deployed RunPod
-	// Serverless endpoints. Requests are routed to one or the other by which
-	// method is called (Submit/Status vs SubmitHiggs/StatusHiggs); both share
-	// this client's HTTP transport and bearer token.
-	mossEndpoint  string
-	higgsEndpoint string
-	apiKey        string
-	http          *http.Client
+	// mossEndpoint, higgsEndpoint and breezeEndpoint are three separately
+	// deployed RunPod Serverless endpoints. Requests are routed to one of them
+	// by which method is called (Submit/Status vs SubmitHiggs/StatusHiggs vs
+	// SubmitBreeze/StatusBreeze); all three share this client's HTTP transport
+	// and bearer token.
+	mossEndpoint   string
+	higgsEndpoint  string
+	breezeEndpoint string
+	apiKey         string
+	http           *http.Client
 }
 
 // Option customizes a Client.
@@ -347,6 +582,13 @@ func WithHTTPClient(h *http.Client) Option {
 // ErrNoHiggsEndpoint rather than falling back to the MOSS endpoint.
 func WithHiggsEndpoint(endpoint string) Option {
 	return func(c *Client) { c.higgsEndpoint = strings.TrimRight(endpoint, "/") }
+}
+
+// WithBreezeEndpoint sets the third endpoint SubmitBreeze and StatusBreeze
+// route to (BREEZE_RUNPOD_ENDPOINT). Left unset, those calls fail with
+// ErrNoBreezeEndpoint rather than falling back to the MOSS or Higgs endpoint.
+func WithBreezeEndpoint(endpoint string) Option {
+	return func(c *Client) { c.breezeEndpoint = strings.TrimRight(endpoint, "/") }
 }
 
 // New builds a client for endpoint (e.g. https://api.runpod.ai/v2/<id>) using
@@ -414,6 +656,33 @@ func (c *Client) SubmitHiggs(ctx context.Context, in HiggsInput) (Submission, er
 	return out, nil
 }
 
+// SubmitBreeze posts a Breeze TTS 2 job to /run on the Breeze endpoint and
+// returns the async id RunPod assigns. The input is validated against the
+// worker's own schema rules (ValidateBreezeInput) before anything is encoded or
+// sent, so a payload the worker would reject never costs a request.
+func (c *Client) SubmitBreeze(ctx context.Context, in BreezeInput) (Submission, error) {
+	if c.breezeEndpoint == "" {
+		return Submission{}, ErrNoBreezeEndpoint
+	}
+	if err := ValidateBreezeInput(in); err != nil {
+		return Submission{}, err
+	}
+
+	body, err := json.Marshal(map[string]any{"input": in})
+	if err != nil {
+		return Submission{}, fmt.Errorf("runpod: encode breeze submission: %w", err)
+	}
+
+	var out Submission
+	if err := c.do(ctx, http.MethodPost, c.breezeEndpoint, "/run", body, &out); err != nil {
+		return Submission{}, err
+	}
+	if out.ID == "" {
+		return Submission{}, errors.New("runpod: /run returned no job id")
+	}
+	return out, nil
+}
+
 // Health probes the endpoint's worker pool and queue depth.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var out Health
@@ -449,6 +718,30 @@ type Output struct {
 	// required field here would hard-fail every job from a worker that omits it.
 	// Absent key ⇒ nil ⇒ the player falls back to proportional interpolation.
 	WordTimings *WordTimings `json:"word_timings,omitempty"`
+
+	// The remaining fields are the Breeze worker's completion metadata
+	// (sruckh/breezetts-runpod). They are additive and omitempty: MOSS and
+	// Higgs never send them, so they stay at their zero value on those engines
+	// and no existing parsing changes. Breeze's audio and its 24000 Hz rate
+	// need no new field — AudioBase64 and SampleRate above already carry them,
+	// and Breeze sends no `format` (the poller's "wav" default applies).
+	//
+	// Delivery must read BreezeDeliveryBase64 on every completion; anything
+	// else means the worker ignored the pinned response_delivery and the audio
+	// is not inline.
+	Delivery        string  `json:"delivery,omitempty"`
+	AudioURL        string  `json:"audio_url,omitempty"`
+	SizeBytes       int64   `json:"size_bytes,omitempty"`
+	Mode            string  `json:"mode,omitempty"`
+	CfgScale        float64 `json:"cfg_scale,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+
+	// Error carries a worker failure envelope that arrived nested inside
+	// `output` rather than at the top level of the status response. RunPod's
+	// own runtime lifts a handler-returned "error" key to StatusResult.Error,
+	// so this is the defensive half of BreezeError. json.RawMessage accepts any
+	// shape, so it can never turn into a permanent DecodeError.
+	Error json.RawMessage `json:"error,omitempty"`
 }
 
 // WordTimings is the optional word-level timing block the serverless worker
@@ -527,6 +820,82 @@ func (sr StatusResult) ErrorString() string {
 	}
 }
 
+// BreezeWorkerError is the Breeze worker's structured failure envelope,
+// {"error":{"code","message","field"}} (schema_validator.py:27, :33). Code is
+// one of the worker's nine documented codes — invalid_payload,
+// missing_required_field, invalid_mode, forbidden_field_for_mode,
+// invalid_base64, reference_audio_too_large, reference_audio_total_too_large,
+// invalid_cfg_scale, invalid_response_delivery — plus whatever synthesis and
+// delivery failures report through the same envelope. Field is omitted when the
+// failure is not field-scoped. The envelope never carries a stack trace, a
+// credential or raw reference audio, so it is safe to persist verbatim as a
+// job's failure reason.
+type BreezeWorkerError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Field   string `json:"field,omitempty"`
+}
+
+func (e *BreezeWorkerError) Error() string {
+	msg := e.Message
+	if msg == "" {
+		msg = "the Breeze worker rejected the request"
+	}
+	switch {
+	case e.Code == "":
+		return "runpod: breeze: " + msg
+	case e.Field == "":
+		return fmt.Sprintf("runpod: breeze %s: %s", e.Code, msg)
+	default:
+		return fmt.Sprintf("runpod: breeze %s (%s): %s", e.Code, e.Field, msg)
+	}
+}
+
+// BreezeError extracts the Breeze worker's failure envelope from a status
+// response, or nil when the response carries none. It reads the top level
+// first — RunPod's runtime lifts a handler-returned "error" key out of the
+// output object — and falls back to Output.Error for the nested form.
+//
+// Whether a given failure is worth retrying is the caller's decision, not this
+// package's: a status response that reached Timbre at all is a completed
+// round-trip, and the poller already fails a FAILED job outright.
+func (sr StatusResult) BreezeError() *BreezeWorkerError {
+	if sr.Error != nil {
+		raw, err := json.Marshal(sr.Error)
+		if err == nil {
+			if env := decodeBreezeError(raw); env != nil {
+				return env
+			}
+		}
+	}
+	return decodeBreezeError(sr.Output.Error)
+}
+
+// decodeBreezeError accepts the envelope bare ({"code":...}) or still wrapped
+// ({"error":{"code":...}}), and returns nil for any other shape — a plain
+// string error from RunPod itself is not a Breeze envelope.
+func decodeBreezeError(raw json.RawMessage) *BreezeWorkerError {
+	if len(raw) == 0 {
+		return nil
+	}
+	var wrapped struct {
+		Error *BreezeWorkerError `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Error != nil {
+		if wrapped.Error.Code != "" || wrapped.Error.Message != "" {
+			return wrapped.Error
+		}
+	}
+	var env BreezeWorkerError
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	if env.Code == "" && env.Message == "" {
+		return nil
+	}
+	return &env
+}
+
 // Status queries GET /status/{id} for the progress or completion of an async job.
 func (c *Client) Status(ctx context.Context, id string) (StatusResult, error) {
 	if id == "" {
@@ -551,6 +920,23 @@ func (c *Client) StatusHiggs(ctx context.Context, id string) (StatusResult, erro
 	}
 	var out StatusResult
 	if err := c.do(ctx, http.MethodGet, c.higgsEndpoint, "/status/"+id, nil, &out); err != nil {
+		return StatusResult{}, err
+	}
+	return out, nil
+}
+
+// StatusBreeze queries GET /status/{id} on the Breeze endpoint. Mirrors Status
+// and StatusHiggs, each of which stays pinned to its own endpoint — a job's
+// engine determines which method the caller uses to poll it.
+func (c *Client) StatusBreeze(ctx context.Context, id string) (StatusResult, error) {
+	if id == "" {
+		return StatusResult{}, errors.New("runpod: empty job id")
+	}
+	if c.breezeEndpoint == "" {
+		return StatusResult{}, ErrNoBreezeEndpoint
+	}
+	var out StatusResult
+	if err := c.do(ctx, http.MethodGet, c.breezeEndpoint, "/status/"+id, nil, &out); err != nil {
 		return StatusResult{}, err
 	}
 	return out, nil

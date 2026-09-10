@@ -16,6 +16,12 @@ material and is **not** in the published repo, so do not assume it is present.
 `.icm/higgs-tts-whisper/` is the local, planning-only ICM pipeline for Higgs
 reference transcription and post-render word alignment; stage outputs are
 human-reviewed handoffs, and stage edits require ICM `sync` then `audit`.
+`.icm/breeze-tts/` is the matching pipeline for Breeze
+TTS 2 as the third engine (clone, design, direction) — its code has landed;
+the same human-reviewed handoff and sync/audit rules apply. Its `references/`
+layer holds each cross-stage fact (reference-audio limits, duration formula,
+submission/alignment seams, compose-card contract) exactly once — link to it,
+never restate the numbers.
 `DESIGN.md` and `index.html` are the design system — `index.html` is the living
 reference, rendered in itself.
 
@@ -35,8 +41,9 @@ reference, rendered in itself.
   whisper.cpp v1.7.1 server has no `/health` route; its Docker healthcheck probes
   `GET /`, while reference transcription (`response_format=json`) and Higgs output
   alignment (`WhisperAligner`, `response_format=verbose_json`, `token_timestamps=true`)
-  use `POST /inference`. The poller invokes output alignment on completed Higgs PCM
-  WAV audio before `MarkReady` (`source: whisper_cpp`); Moss renders bypass local
+  use `POST /inference`. The poller invokes output alignment on completed Higgs and Breeze PCM
+  WAV audio before `MarkReady` (`source: whisper_cpp`) — for Breeze it is the
+  only timing source, as its worker emits no `word_timings` at all; Moss renders bypass local
   alignment and preserve native timings. Alignment failures log a privacy-safe
   warning and save empty alignment (`""`) so the player uses proportional fallback.
   Stopping only the sidecar is the rollback fallback: MOSS jobs and the app UI stay
@@ -59,7 +66,11 @@ reference, rendered in itself.
   **Moss, the MOSS-TTS v1.5 default voice** (no reference audio; the MOSS
   endpoint renders its built-in voice) — and reconciles away any stale stock
   rows. MOSS-TTS v1.5 remains the default engine; the studio also exposes
-  `bosonai/higgs-tts-3-4b`, whose voice identity comes from cloned references.
+  `bosonai/higgs-tts-3-4b`, whose voice identity comes from cloned references,
+  and `BreezeBlue/Breeze-TTS-2`, which adds three modes: **clone** (reference +
+  stored transcript), **design** (a written instruction alone — the one render
+  that posts no `voice_id` and stores it SQL NULL), and **direction** (clone +
+  steering instruction).
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
   extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row,
@@ -167,7 +178,14 @@ reference, rendered in itself.
   still returns the same fragment. `POST /jobs` accepts the engine plus the
   studio's parameter fields (`seed`, `pace`, `pitch`, `expressiveness`,
   `normalize`, `output_48k`, plus `max_new_tokens`) into `jobs.model` and
-  `params_json`, validated 400 on bad values. Blank engine selections default to
+  `params_json`, validated 400 on bad values. Breeze adds `mode` / `instruct` /
+  `cfg_scale`, which the server reads **only when the engine is Breeze** — the
+  studio hides those controls with `x-show` (`display:none`), and hidden fields
+  still submit, so ungated parsing would leak them into a MOSS or Higgs job's
+  `params_json` and out to that worker as `Extra`. A Breeze design render posts
+  no `voice_id` (the compose card disables the input; disabled inputs don't
+  submit) and is enqueued with SQL NULL — every other engine/mode still 400s
+  without a voice. Blank engine selections default to
   MOSS and unknown engines are rejected. The server returns at most ten rows;
   this is the strict queue cap, not merely a visual crop. The queue's Length column and the player derive audio duration
   from the saved WAV's byte size (`audioDurations` in
@@ -192,7 +210,8 @@ reference, rendered in itself.
   **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
   backfilled by `db.Migrate` for older rows). Queue rows and the player both read
   their model badges from that column — never from a presentation-only literal.
-  Browser/API selection is limited to `jobs.DefaultModel` and `jobs.HiggsModel`;
+  Browser/API selection is limited to `jobs.DefaultModel`, `jobs.HiggsModel` and
+  `jobs.BreezeModel`;
   the store remains able to preserve explicit historical attribution. The frontend is templ + HTMX v4 (ESM from
   jsdelivr) + Alpine 3 + Tailwind v4; component CSS (badges, buttons, range,
   toggle, spoken line, alerts, empty states) lives in

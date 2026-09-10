@@ -75,20 +75,37 @@ whisper_health() {
 # Secrets land in the APP PROCESS's env, not the container's, so a fresh exec
 # shell cannot see RUNPOD_API_KEY directly. Read it out of the running process's
 # /proc/<pid>/environ instead — the documented way to confirm injection worked.
-verify_secrets() {
-  say "Verifying RUNPOD_API_KEY was injected into the app process"
-  # shellcheck disable=SC2016  # $p expands in the INNER sh, not this shell
-  if "${COMPOSE[@]}" exec -T app sh -c '
+# Presence probe for one injected variable. Reports presence only — an endpoint
+# URL is deployment configuration and never belongs in terminal scrollback.
+# shellcheck disable=SC2016  # $p and $1 expand in the INNER sh, not this shell
+env_present() {
+  "${COMPOSE[@]}" exec -T app sh -c '
       for p in /proc/[0-9]*; do
         tr "\0" "\n" < "$p/environ" 2>/dev/null \
-          | grep -q "^RUNPOD_API_KEY=." && { echo present; exit 0; }
-      done; exit 1' 2>/dev/null | grep -q present; then
+          | grep -q "^$1=." && { echo present; exit 0; }
+      done; exit 1' _ "$1" 2>/dev/null | grep -q present
+}
+
+verify_secrets() {
+  say "Verifying RUNPOD_API_KEY was injected into the app process"
+  if env_present RUNPOD_API_KEY; then
     printf '  RUNPOD_API_KEY: present\n'
   else
     warn "RUNPOD_API_KEY NOT found in the app process — secrets were not injected.
    Check the identity was loaded and RUNPOD_API_KEY exists in that Infisical project/env."
     return 1
   fi
+
+  # Optional per-engine endpoints. Absent is not a failure: the stack serves
+  # every configured engine and simply does not offer the missing one.
+  local engine
+  for engine in HIGGS_RUNPOD_ENDPOINT BREEZE_RUNPOD_ENDPOINT; do
+    if env_present "$engine"; then
+      printf '  %s: present\n' "$engine"
+    else
+      printf '  %s: absent — that engine is hidden in the studio\n' "$engine"
+    fi
+  done
 }
 
 cmd_start() {
