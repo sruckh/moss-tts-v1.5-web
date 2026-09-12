@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"database/sql"
+	"os"
 	"strings"
 	"testing"
 
@@ -305,6 +306,30 @@ func TestPlayerWordTimings(t *testing.T) {
 	}
 }
 
+// The queue's scroll container must carry overflow-anchor:none. The 2s poll
+// replaces every row in one outerHTML swap, and Chromium's scroll anchoring
+// recomputes against the fresh nodes — snapping any non-top scroll position
+// straight to the bottom (reproduced in Chromium/Brave: 500px -> max on the
+// first tick; with the property set the offset holds indefinitely).
+func TestScrollableListDisablesScrollAnchoring(t *testing.T) {
+	data, err := os.ReadFile("app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v (did the Tailwind build step run?)", err)
+	}
+	css := string(data)
+	i := strings.Index(css, ".scrollable-list {")
+	if i < 0 {
+		i = strings.Index(css, ".scrollable-list{")
+	}
+	if i < 0 {
+		t.Fatal("app.css has no .scrollable-list rule")
+	}
+	rule := css[i : i+strings.Index(css[i:], "}")+1]
+	if !strings.Contains(rule, "overflow-anchor") {
+		t.Errorf(".scrollable-list rule is missing overflow-anchor:none: %s", rule)
+	}
+}
+
 // The queue's vertical scroll container must live OUTSIDE the swapped #queue
 // fragment: the 2s poll replaces #queue with hx-swap="outerHTML", so any
 // element inside it that holds a scroll offset is recreated on every tick and
@@ -319,8 +344,14 @@ func TestQueueScrollContainerIsOutsideSwappedFragment(t *testing.T) {
 			t.Errorf("queue fragment contains %q — scroll/JS state inside the swapped fragment is reset by every poll", banned)
 		}
 	}
-	if !strings.Contains(fragment, `hx-swap="outerHTML"`) {
-		t.Error("queue fragment no longer swaps outerHTML — poll contract changed?")
+	if !strings.Contains(fragment, `hx-swap="outerHTML show:none"`) {
+		t.Error("queue fragment missing 'show:none' swap modifier — without it every 2s poll scrolls #queue into view, dragging the page scrollbar to the bottom")
+	}
+	if !strings.Contains(fragment, `hx-swap="innerHTML show:none"`) {
+		t.Error("queue row's player load missing 'show:none' — selecting a take must not scroll the page to the player")
+	}
+	if got := strings.Count(fragment, `hx-swap="outerHTML show:none"`); got < 2 {
+		t.Errorf("expected the poll AND every row's delete button to swap with show:none, found %d outerHTML show:none swaps", got)
 	}
 
 	for name, page := range map[string]templ.Component{

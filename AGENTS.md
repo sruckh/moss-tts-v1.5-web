@@ -207,6 +207,13 @@ reference, rendered in itself.
   a scroll offset is recreated and the scroll snaps back to the top. Do not fix
   this with `hx-on` scroll-preservation handlers — under HTMX v4 the after-swap
   handler's `this` is the detached pre-swap element, so they silently no-op.
+  The same swap also trips Chromium scroll anchoring: with the default
+  `overflow-anchor:auto`, the first tick after a take is selected snaps any
+  non-top scroll position in the queue list straight to the bottom. That is why
+  `.scrollable-list` carries `overflow-anchor:none` in `internal/web/input.css`
+  — removing it brings the bug back (`TestScrollableListDisablesScrollAnchoring`
+  guards it; `hx-swap="outerHTML show:none"` on the poll/row/delete swaps and
+  the player load are the second layer).
   **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
   backfilled by `db.Migrate` for older rows). Queue rows and the player both read
   their model badges from that column — never from a presentation-only literal.
@@ -296,7 +303,11 @@ that references it. The copies never feed the build: `.dockerignore` excludes
 The build deliberately does **not** minify — the minifier folds `color-mix()`
 into computed hexes, which would put non-palette colors in the output. `@theme
 static` forces all ten tokens into the compiled CSS even before anything uses
-them.
+them. Pages never link `/static/app.css` bare: `Layout` appends
+`?v=<sha256[:12] of the embedded bytes>` and the `/static/*` handler answers
+`Cache-Control: immutable`. Cloudflare caches /static hard enough that an
+unversioned stylesheet URL has shipped invisible CSS fixes twice; the
+fingerprint test in `palette_test.go` guards this.
 
 The only non-palette hexes in `app.css` are Tailwind's own `@property` defaults
 for shadow/ring utilities (`#0000`, `#fff`), which this design never uses —

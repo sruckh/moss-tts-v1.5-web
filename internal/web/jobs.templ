@@ -120,12 +120,17 @@ func queuePollURL(selected int64) string {
 // container (`scrollable-list max-h-[500px]`) lives outside too, in the page
 // templates that embed Queue: the element holding the scroll offset must never
 // be inside the swapped fragment, or every 2s tick snaps it back to the top.
+//
+// `show:none` is load-bearing in a different direction: without it HTMX scrolls
+// the freshly swapped #queue into view on every tick, and because the queue
+// sits below the voice library, the page scrollbar drops to the bottom and the
+// selected voice card leaves the viewport.
 templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, selected int64) {
 	<div
 		id="queue"
 		hx-get={ queuePollURL(selected) }
 		hx-trigger="every 2s"
-		hx-swap="outerHTML"
+		hx-swap="outerHTML show:none"
 		aria-live="polite"
 		data-take={ strconv.FormatInt(selected, 10) }
 		class="flex flex-col gap-3"
@@ -175,7 +180,9 @@ templ Queue(items []jobs.Job, justQueued int64, durations map[int64]string, sele
 // user learns why.
 //
 // The row controls stop click propagation: downloading or deleting a take is
-// not a request to play it.
+// not a request to play it. Both the row's player load and the delete swap
+// carry show:none for the same reason the poll does — selecting or deleting a
+// take must never yank the page scroll to the queue or the player below it.
 templ queueRow(j jobs.Job, durations map[int64]string, selected bool) {
 	<tr
 		id={ "job-" + strconv.FormatInt(j.ID, 10) }
@@ -185,7 +192,7 @@ templ queueRow(j jobs.Job, durations map[int64]string, selected bool) {
 		data-take={ strconv.FormatInt(j.ID, 10) }
 		hx-get={ "/jobs/" + strconv.FormatInt(j.ID, 10) + "/player" }
 		hx-target="#playback-body"
-		hx-swap="innerHTML"
+		hx-swap="innerHTML show:none"
 		hx-trigger="click, keyup[key=='Enter'], keyup[key==' ']"
 	>
 		<td>
@@ -228,7 +235,7 @@ templ queueRow(j jobs.Job, durations map[int64]string, selected bool) {
 					type="button"
 					hx-delete={ "/jobs/" + strconv.FormatInt(j.ID, 10) }
 					hx-target="#queue"
-					hx-swap="outerHTML"
+					hx-swap="outerHTML show:none"
 					hx-confirm={ "Delete take " + strconv.FormatInt(j.ID, 10) + "? The WAV goes with it." }
 					onclick="event.stopPropagation()"
 					class="btn btn--danger btn--sm btn--icon"

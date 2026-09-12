@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"regexp"
 	"strings"
@@ -68,6 +70,23 @@ func TestPaletteExhaustiveCompiledCSS(t *testing.T) {
 	}
 	if bad := foreignHexes(string(data)); len(bad) > 0 {
 		t.Errorf("app.css contains colors outside the 10 palette hexes: %v", bad)
+	}
+}
+
+// The stylesheet link must carry the per-build fingerprint: the app sits
+// behind Cloudflare, which caches /static aggressively, so an unversioned
+// /static/app.css URL can pin a stale stylesheet on clients past a deploy.
+// The version must match the on-disk app.css the test binary embedded.
+func TestStylesheetURLIsFingerprinted(t *testing.T) {
+	data, err := os.ReadFile("app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v (did the Tailwind build step run?)", err)
+	}
+	sum := sha256.Sum256(data)
+	want := "/static/app.css?v=" + hex.EncodeToString(sum[:])[:12]
+	html := render(t, Layout("test"))
+	if !strings.Contains(html, want) {
+		t.Errorf("layout did not render the fingerprinted stylesheet URL %q", want)
 	}
 }
 

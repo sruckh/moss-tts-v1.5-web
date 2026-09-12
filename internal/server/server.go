@@ -81,7 +81,14 @@ func (s *Server) routes() {
 	s.router.Post("/apply", s.handleApply)
 	s.router.Get("/apply/status", s.handleApplyStatus)
 	s.router.Handle("/static/*", http.StripPrefix("/static/",
-		http.FileServer(http.FS(web.StaticFS()))))
+		// The stylesheet URL carries a per-build ?v= fingerprint (see
+		// web.CSSVersion), so a given URL's bytes never change — safe to let
+		// Cloudflare and browsers cache it forever, and every deploy still
+		// reaches clients because the URL itself changes.
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			http.FileServer(http.FS(web.StaticFS())).ServeHTTP(w, r)
+		})))
 	s.router.Get("/health", s.handleRunPodHealth)
 	s.router.Route("/admin", func(r chi.Router) {
 		r.Use(s.adminOnly)
