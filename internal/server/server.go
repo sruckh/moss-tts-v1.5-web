@@ -154,17 +154,16 @@ func (s *Server) handleRunPodHealth(w http.ResponseWriter, r *http.Request) {
 	body := struct {
 		OK     bool         `json:"ok"`
 		RunPod runpodStatus `json:"runpod"`
+		AuK    runpodStatus `json:"auk"`
 	}{OK: true}
 
 	body.RunPod.Configured = s.runpod != nil && s.runpod.Configured()
-	switch {
-	case !body.RunPod.Configured:
+	if !body.RunPod.Configured {
 		body.RunPod.Error = "RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured"
-	default:
+	} else {
 		ctx, cancel := context.WithTimeout(r.Context(), runPodHealthTimeout)
-		defer cancel()
-
 		health, err := s.runpod.Health(ctx)
+		cancel()
 		if err != nil {
 			body.RunPod.Error = err.Error()
 		} else {
@@ -173,9 +172,22 @@ func (s *Server) handleRunPodHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	body.AuK.Configured = s.runpod != nil && s.runpod.AuKConfigured()
+	if !body.AuK.Configured {
+		body.AuK.Error = "AUK_RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured"
+	} else {
+		ctx, cancel := context.WithTimeout(r.Context(), runPodHealthTimeout)
+		health, err := s.runpod.HealthAuK(ctx)
+		cancel()
+		if err != nil {
+			body.AuK.Error = err.Error()
+		} else {
+			body.AuK.Reachable = true
+			body.AuK.Detail = &health
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	// Still 200: the app is up. The runpod object carries the upstream verdict,
-	// so a monitor watching this route can distinguish the two failures.
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(body)
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -30,6 +32,7 @@ type StatusClient interface {
 	Status(ctx context.Context, id string) (runpod.StatusResult, error)
 	StatusHiggs(ctx context.Context, id string) (runpod.StatusResult, error)
 	StatusBreeze(ctx context.Context, id string) (runpod.StatusResult, error)
+	StatusAuK(ctx context.Context, id string) (runpod.StatusResult, error)
 }
 
 // Poller checks RunPod status for submitted/in_progress jobs, saves audio on completion,
@@ -124,6 +127,8 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		res, err = p.client.StatusHiggs(ctx, job.RunPodID)
 	case job.IsBreeze():
 		res, err = p.client.StatusBreeze(ctx, job.RunPodID)
+	case job.IsAuK():
+		res, err = p.client.StatusAuK(ctx, job.RunPodID)
 	default:
 		res, err = p.client.Status(ctx, job.RunPodID)
 	}
@@ -148,7 +153,7 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 			}
 		}
 
-	case runpod.StatusFailed:
+	case runpod.StatusFailed, runpod.StatusCancelled, runpod.StatusTimedOut:
 		reason := res.ErrorString()
 		// Breeze's structured failure envelope can land nested in
 		// Output.Error rather than at the top level (RunPod's runtime only
@@ -160,6 +165,11 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 				reason = env.Error()
 			}
 		}
+		if job.IsAuK() {
+			if env := res.AuKError(); env != nil {
+				reason = env.Error()
+			}
+		}
 		if reason == "" {
 			reason = "RunPod execution failed"
 		}
@@ -167,16 +177,10 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		p.fail(ctx, job.ID, reason)
 
 	case runpod.StatusCompleted:
-		if res.Output.AudioBase64 == "" {
-			p.log.Error("poller: completed job had empty audio_base64", "job", job.ID, "runpod_id", job.RunPodID)
-			p.fail(ctx, job.ID, "RunPod output contains no audio data")
-			return
-		}
-
-		audioData, err := base64.StdEncoding.DecodeString(res.Output.AudioBase64)
+		audioData, err := outputAudio(ctx, res.Output)
 		if err != nil {
-			p.log.Error("poller: decode audio_base64", "job", job.ID, "err", err)
-			p.fail(ctx, job.ID, "failed to decode audio base64: "+err.Error())
+			p.log.Error("poller: collect completed audio", "job", job.ID, "err", err)
+			p.fail(ctx, job.ID, err.Error())
 			return
 		}
 
@@ -217,7 +221,7 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		// completion payloads bypass local alignment and preserve native
 		// word_timings verbatim.
 		alignmentJSON := ""
-		if job.IsHiggs() || job.IsBreeze() {
+		if job.IsHiggs() || job.IsBreeze() || shouldAlignAuK(job, res.Output) {
 			if p.aligner != nil {
 				wt, err := p.aligner.AlignOutput(ctx, audioData)
 				if err != nil {
@@ -242,6 +246,77 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		}
 		p.log.Info("job ready", "job", job.ID, "runpod_id", job.RunPodID, "path", fullPath)
 	}
+}
+
+
+const maxRunPodOutputBytes = 64 << 20
+
+func outputAudio(ctx context.Context, output runpod.Output) ([]byte, error) {
+	if output.AudioBase64 != "" {
+		data, err := base64.StdEncoding.DecodeString(output.AudioBase64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode audio base64: %w", err)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("RunPod output contains empty audio data")
+		}
+		if len(data) > maxRunPodOutputBytes {
+			return nil, fmt.Errorf("RunPod output exceeds the %d byte limit", maxRunPodOutputBytes)
+		}
+		return data, nil
+	}
+	if output.AudioURL == "" {
+		return nil, fmt.Errorf("RunPod output contains no audio data")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, output.AudioURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build audio download request: %w", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download RunPod audio: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("download RunPod audio: HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxRunPodOutputBytes {
+		return nil, fmt.Errorf("RunPod output exceeds the %d byte limit", maxRunPodOutputBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRunPodOutputBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read RunPod audio: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("RunPod output contains empty audio data")
+	}
+	if len(data) > maxRunPodOutputBytes {
+		return nil, fmt.Errorf("RunPod output exceeds the %d byte limit", maxRunPodOutputBytes)
+	}
+	return data, nil
+}
+
+
+func shouldAlignAuK(job jobs.Job, output runpod.Output) bool {
+	if !job.IsAuK() {
+		return false
+	}
+	task := output.TaskExecuted
+	if task == "" {
+		params := job.Params()
+		task, _ = params["task"].(string)
+		if task == "" || task == runpod.AuKTaskAuto {
+			if _, ok := params["prompt_audio"]; ok {
+				task = runpod.AuKTaskZeroShotTTS
+			} else if _, ok := params["prompt_audio_path"]; ok {
+				task = runpod.AuKTaskZeroShotTTS
+			} else {
+				task = runpod.AuKTaskInstructTTS
+			}
+		}
+	}
+	return task == runpod.AuKTaskZeroShotTTS || task == runpod.AuKTaskInstructTTS
 }
 
 func (p *Poller) fail(ctx context.Context, id int64, reason string) {

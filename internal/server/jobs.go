@@ -1,11 +1,15 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -18,7 +22,11 @@ import (
 )
 
 // queueLimit is how many of a user's jobs the queue fragment shows.
-const queueLimit = 10
+const (
+	queueLimit            = 10
+	maxAuKRequestBytes    = 34 << 20
+	maxAuKMultipartMemory = 1 << 20
+)
 
 // maxNewTokensCeiling bounds the one generation parameter the form exposes. The
 // handler defaults to 4096; a larger value only buys a longer render.
@@ -109,29 +117,37 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "could not read the form", http.StatusBadRequest)
+	if err := parseJobForm(w, r); err != nil {
+		http.Error(w, "could not read the form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
 
-	// Engine and parameters are resolved before the voice, because Breeze's
-	// design mode is the one render that legitimately posts no voice_id at all:
-	// the compose card disables that input. Validating the voice first would 400
-	// that request before anything could know it was allowed to omit one.
-	// The voice library section itself stays visible in design mode, so a
-	// design request naming a voice is still possible and is handled here
-	// rather than assumed away.
 	model, err := jobs.ResolveModel(r.PostFormValue("model"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	params, err := parseJobParams(r, model)
+	var params map[string]any
+	var inputPaths []string
+	if model == jobs.AuKModel {
+		params, inputPaths, err = s.parseAuKJobParams(r, userID)
+	} else {
+		params, err = parseJobParams(r, model)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	keepInputs := false
+	defer func() {
+		if !keepInputs {
+			removePaths(inputPaths)
+		}
+	}()
 
 	designRender := false
 	if model == jobs.BreezeModel {
@@ -146,21 +162,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Design renders from the instruction alone and the worker rejects a
-		// reference outright, so the job records no voice link — the
-		// instruction is the voice identity.
 		designRender = mode == runpod.BreezeModeDesign
 	}
 
 	var voiceID int64
-	if !designRender {
+	needsVoice := model != jobs.AuKModel && !designRender
+	if needsVoice {
 		voiceID, err = strconv.ParseInt(strings.TrimSpace(r.PostFormValue("voice_id")), 10, 64)
 		if err != nil || voiceID <= 0 {
 			http.Error(w, jobs.ErrNoVoice.Error(), http.StatusBadRequest)
 			return
 		}
-		// The voice must exist: a job pinned to a phantom id would only fail
-		// later, in the worker, where the user never sees why.
 		v, err := s.voices.Get(r.Context(), voiceID)
 		if err != nil {
 			if errors.Is(err, voices.ErrNotFound) {
@@ -181,16 +193,21 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	text := r.PostFormValue("text")
+	language := r.PostFormValue("language")
+	if model == jobs.AuKModel {
+		text = r.PostFormValue("instruction")
+		language = ""
+	}
 	id, err := s.jobs.Enqueue(r.Context(), jobs.NewJob{
 		UserID:   userID,
 		VoiceID:  voiceID,
-		Text:     r.PostFormValue("text"),
-		Language: r.PostFormValue("language"),
+		Text:     text,
+		Language: language,
 		Model:    model,
 		Params:   params,
 	})
 	if err != nil {
-		// Enqueue's validation errors are written for the user.
 		if errors.Is(err, jobs.ErrEmptyText) || errors.Is(err, jobs.ErrTextTooLong) ||
 			errors.Is(err, jobs.ErrLanguage) || errors.Is(err, jobs.ErrNoVoice) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -199,6 +216,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
+	keepInputs = true
 
 	if wantsJSON(r) {
 		created, err := s.jobs.Get(r.Context(), id, userID)
@@ -217,6 +235,204 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderQueue(w, r, items, id)
+}
+
+
+func parseJobForm(w http.ResponseWriter, r *http.Request) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuKRequestBytes)
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		return r.ParseMultipartForm(maxAuKMultipartMemory)
+	}
+	return r.ParseForm()
+}
+
+func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]any, []string, error) {
+	params := map[string]any{}
+	paths := make([]string, 0, 2)
+	cleanup := func(err error) (map[string]any, []string, error) {
+		removePaths(paths)
+		return nil, nil, err
+	}
+
+	audio, audioPath, err := s.parseAuKAudio(r, userID, "audio", "audio_file")
+	if err != nil {
+		return cleanup(err)
+	}
+	if audio != "" {
+		params["audio"] = audio
+	}
+	if audioPath != "" {
+		params["audio_path"] = audioPath
+		paths = append(paths, audioPath)
+	}
+
+	promptAudio, promptPath, err := s.parseAuKAudio(r, userID, "prompt_audio", "prompt_audio_file")
+	if err != nil {
+		return cleanup(err)
+	}
+	if promptAudio != "" {
+		params["prompt_audio"] = promptAudio
+	}
+	if promptPath != "" {
+		params["prompt_audio_path"] = promptPath
+		paths = append(paths, promptPath)
+	}
+
+	in := runpod.AuKInput{
+		Task:             strings.TrimSpace(r.PostFormValue("task")),
+		Instruction:      strings.TrimSpace(r.PostFormValue("instruction")),
+		Audio:            auKValidationAudio(audio, audioPath),
+		PromptAudio:      auKValidationAudio(promptAudio, promptPath),
+		PromptText:       strings.TrimSpace(r.PostFormValue("prompt_text")),
+		GenText:          strings.TrimSpace(r.PostFormValue("gen_text")),
+		ModelVariant:     strings.TrimSpace(r.PostFormValue("model_variant")),
+		ResponseDelivery: strings.TrimSpace(r.PostFormValue("response_delivery")),
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("gen_seconds")); raw != "" {
+		in.GenSeconds, err = strconv.ParseFloat(raw, 64)
+		if err != nil || in.GenSeconds < 0.5 || in.GenSeconds > 300 {
+			return cleanup(errors.New("gen_seconds must be between 0.5 and 300"))
+		}
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("nfe")); raw != "" {
+		in.NFE, err = strconv.Atoi(raw)
+		if err != nil {
+			return cleanup(errors.New("nfe must be a whole number"))
+		}
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("cfg_scale")); raw != "" {
+		in.CfgScale, err = strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return cleanup(errors.New("cfg_scale must be a number"))
+		}
+	}
+	if raw := strings.TrimSpace(r.PostFormValue("seed")); raw != "" {
+		seed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || seed < 0 {
+			return cleanup(errors.New("seed must be a non-negative number"))
+		}
+		in.Seed = &seed
+	}
+
+	in = runpod.NormalizeAuKInput(in)
+	if err := runpod.ValidateAuKInput(in); err != nil {
+		return cleanup(err)
+	}
+	params["task"] = in.Task
+	params["model_variant"] = in.ModelVariant
+	params["nfe"] = in.NFE
+	params["cfg_scale"] = in.CfgScale
+	params["response_delivery"] = in.ResponseDelivery
+	if in.PromptText != "" {
+		params["prompt_text"] = in.PromptText
+	}
+	if in.GenSeconds != 0 {
+		params["gen_seconds"] = in.GenSeconds
+	}
+	if in.GenText != "" {
+		params["gen_text"] = in.GenText
+	}
+	if in.Seed != nil {
+		params["seed"] = *in.Seed
+	}
+	return params, paths, nil
+}
+
+func (s *Server) parseAuKAudio(r *http.Request, userID int64, valueField, fileField string) (string, string, error) {
+	direct := strings.TrimSpace(r.PostFormValue(valueField))
+	file, _, fileErr := r.FormFile(fileField)
+	// A urlencoded request (API callers, non-multipart forms) has no file
+	// part at all: ErrNotMultipart means "nothing uploaded here", exactly
+	// like ErrMissingFile does inside a multipart body.
+	hasFile := fileErr == nil
+	if fileErr != nil && !errors.Is(fileErr, http.ErrMissingFile) && !errors.Is(fileErr, http.ErrNotMultipart) {
+		return "", "", fmt.Errorf("read %s: %w", fileField, fileErr)
+	}
+	if direct != "" && hasFile {
+		_ = file.Close()
+		return "", "", fmt.Errorf("provide %s as either an upload or URL/base64, not both", valueField)
+	}
+	if hasFile {
+		data, err := io.ReadAll(io.LimitReader(file, runpod.AuKMaxAudioBytes+1))
+		closeErr := file.Close()
+		if err != nil {
+			return "", "", fmt.Errorf("read %s: %w", fileField, err)
+		}
+		if closeErr != nil {
+			return "", "", fmt.Errorf("close %s: %w", fileField, closeErr)
+		}
+		if len(data) == 0 {
+			return "", "", fmt.Errorf("%s is empty", fileField)
+		}
+		if len(data) > runpod.AuKMaxAudioBytes {
+			return "", "", fmt.Errorf("%s exceeds the 15 MB decoded limit", fileField)
+		}
+		path, err := s.saveAuKInput(userID, valueField, data)
+		return "", path, err
+	}
+	if direct == "" {
+		return "", "", nil
+	}
+	if parsed, err := url.ParseRequestURI(direct); err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return direct, "", nil
+	}
+	encoded := direct
+	if strings.HasPrefix(encoded, "data:") {
+		comma := strings.IndexByte(encoded, ',')
+		if comma < 0 || !strings.Contains(encoded[:comma], ";base64") {
+			return "", "", fmt.Errorf("%s must be base64, a base64 data URL, or an HTTP(S) URL", valueField)
+		}
+		encoded = encoded[comma+1:]
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 {
+		return "", "", fmt.Errorf("%s is not valid base64 or an HTTP(S) URL", valueField)
+	}
+	if len(data) > runpod.AuKMaxAudioBytes {
+		return "", "", fmt.Errorf("%s exceeds the 15 MB decoded limit", valueField)
+	}
+	path, err := s.saveAuKInput(userID, valueField, data)
+	return "", path, err
+}
+
+func (s *Server) saveAuKInput(userID int64, field string, data []byte) (string, error) {
+	dir := filepath.Join(s.cfg.AudioDir, "inputs", "user_"+strconv.FormatInt(userID, 10))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", fmt.Errorf("create private AuK input directory: %w", err)
+	}
+	file, err := os.CreateTemp(dir, field+"-*")
+	if err != nil {
+		return "", fmt.Errorf("create private AuK input: %w", err)
+	}
+	path := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("store private AuK input: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close private AuK input: %w", err)
+	}
+	return path, nil
+}
+
+func auKValidationAudio(direct, path string) string {
+	if direct != "" {
+		return direct
+	}
+	if path != "" {
+		return "YQ=="
+	}
+	return ""
+}
+
+func removePaths(paths []string) {
+	for _, path := range paths {
+		if strings.TrimSpace(path) != "" {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 // renderQueue writes the queue as JSON or as the HTMX fragment.
@@ -474,9 +690,11 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	paths := deleted.InputPaths()
 	if deleted.AudioPath != "" {
-		_ = os.Remove(deleted.AudioPath)
+		paths = append(paths, deleted.AudioPath)
 	}
+	removePaths(paths)
 
 	if wantsJSON(r) {
 		w.Header().Set("Content-Type", "application/json")

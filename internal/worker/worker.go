@@ -22,6 +22,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,7 @@ type Submitter interface {
 	Submit(ctx context.Context, in runpod.Input) (runpod.Submission, error)
 	SubmitHiggs(ctx context.Context, in runpod.HiggsInput) (runpod.Submission, error)
 	SubmitBreeze(ctx context.Context, in runpod.BreezeInput) (runpod.Submission, error)
+	SubmitAuK(ctx context.Context, in runpod.AuKInput) (runpod.Submission, error)
 }
 
 // DefaultWhisperURL is the private whisper-server sidecar's base URL. It is
@@ -527,6 +529,18 @@ func (w *Worker) submit(ctx context.Context, job jobs.Job) {
 			w.handleSubmitError(ctx, job, err)
 			return
 		}
+	} else if job.IsAuK() {
+		aukInput, err := w.buildAuKInput(job)
+		if err != nil {
+			w.log.Error("worker: build AuK input", "job", job.ID, "err", err)
+			w.fail(ctx, job.ID, err.Error())
+			return
+		}
+		submission, err = w.client.SubmitAuK(ctx, aukInput)
+		if err != nil {
+			w.handleSubmitError(ctx, job, err)
+			return
+		}
 	} else {
 		input, err := w.buildInput(ctx, job)
 		if err != nil {
@@ -560,6 +574,13 @@ func (w *Worker) submit(ctx context.Context, job jobs.Job) {
 		w.log.Warn("worker: job was already submitted; ignoring duplicate",
 			"job", job.ID, "runpod_id", submission.ID)
 		return
+	}
+	if job.IsAuK() {
+		for _, path := range job.InputPaths() {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				w.log.Warn("worker: remove submitted AuK input", "job", job.ID, "err", err)
+			}
+		}
 	}
 	w.log.Info("job submitted",
 		"job", job.ID, "runpod_id", submission.ID, "status", status, "engine", job.Model)
@@ -767,6 +788,68 @@ func (w *Worker) buildBreezeInput(ctx context.Context, job jobs.Job) (runpod.Bre
 	default:
 		return runpod.BreezeInput{}, fmt.Errorf("unknown breeze mode %q", mode)
 	}
+}
+
+
+func (w *Worker) buildAuKInput(job jobs.Job) (runpod.AuKInput, error) {
+	params := job.Params()
+	audio, err := loadAuKAudio(params, "audio", "audio_path")
+	if err != nil {
+		return runpod.AuKInput{}, err
+	}
+	promptAudio, err := loadAuKAudio(params, "prompt_audio", "prompt_audio_path")
+	if err != nil {
+		return runpod.AuKInput{}, err
+	}
+	input := runpod.AuKInput{
+		Task:             breezeParamString(params, "task"),
+		Instruction:      strings.TrimSpace(job.Text),
+		Audio:            audio,
+		PromptAudio:      promptAudio,
+		PromptText:       breezeParamString(params, "prompt_text"),
+		GenText:          breezeParamString(params, "gen_text"),
+		ModelVariant:     breezeParamString(params, "model_variant"),
+		ResponseDelivery: breezeParamString(params, "response_delivery"),
+	}
+	if value, ok := params["gen_seconds"].(float64); ok {
+		input.GenSeconds = value
+	}
+	if value, ok := params["nfe"].(float64); ok {
+		input.NFE = int(value)
+	}
+	if value, ok := params["cfg_scale"].(float64); ok {
+		input.CfgScale = value
+	}
+	if value, ok := params["seed"].(float64); ok {
+		seed := int64(value)
+		input.Seed = &seed
+	}
+	input = runpod.NormalizeAuKInput(input)
+	if err := runpod.ValidateAuKInput(input); err != nil {
+		return runpod.AuKInput{}, err
+	}
+	return input, nil
+}
+
+func loadAuKAudio(params map[string]any, valueKey, pathKey string) (string, error) {
+	if value := breezeParamString(params, valueKey); value != "" {
+		return value, nil
+	}
+	path := breezeParamString(params, pathKey)
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read private AuK %s: %w", valueKey, err)
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("private AuK %s is empty", valueKey)
+	}
+	if len(data) > runpod.AuKMaxAudioBytes {
+		return "", fmt.Errorf("private AuK %s exceeds the 15 MB decoded limit", valueKey)
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // ensureTranscript guarantees a non-empty reference_transcript exists before a

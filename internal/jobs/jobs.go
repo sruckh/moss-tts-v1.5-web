@@ -36,13 +36,14 @@ const MaxTextRunes = 5000
 const MaxLanguageLen = 64
 
 // DefaultModel is the backwards-compatible engine selected when a browser or
-// API caller omits model. HiggsModel and BreezeModel are the alternate engines
-// exposed by the studio; every value is stored verbatim in jobs.model for
-// attribution. BreezeModel must stay identical to runpod.BreezeModel.
+// API caller omits model. The alternate values are stored verbatim in
+// jobs.model for attribution and must stay identical to their runpod package
+// counterparts.
 const (
 	DefaultModel = "MOSS-TTS v1.5"
 	HiggsModel   = "bosonai/higgs-tts-3-4b"
 	BreezeModel  = "BreezeBlue/Breeze-TTS-2"
+	AuKModel     = "tencent/AuK"
 )
 
 // Validation failures from Enqueue. The handler maps each to a 400 with the
@@ -52,7 +53,7 @@ var (
 	ErrTextTooLong = fmt.Errorf("text is longer than %d characters", MaxTextRunes)
 	ErrLanguage    = errors.New("language hint is too long")
 	ErrNoVoice     = errors.New("pick a voice")
-	ErrModel       = errors.New("choose MOSS-TTS v1.5 or Higgs TTS 3.4B")
+	ErrModel       = errors.New("choose MOSS-TTS v1.5, Higgs TTS 3.4B, Breeze TTS 2 or Tencent AuK")
 )
 
 // ErrNotFound is returned when no job matches the query.
@@ -146,7 +147,7 @@ func ResolveModel(model string) (string, error) {
 		return DefaultModel, nil
 	}
 	switch model {
-	case DefaultModel, HiggsModel, BreezeModel:
+	case DefaultModel, HiggsModel, BreezeModel, AuKModel:
 		return model, nil
 	default:
 		return "", ErrModel
@@ -181,6 +182,24 @@ func (j Job) IsHiggs() bool { return j.Model == HiggsModel }
 // correct RunPod endpoint on both submit and poll. The two are mutually
 // exclusive: a job carries exactly one model string.
 func (j Job) IsBreeze() bool { return j.Model == BreezeModel }
+
+
+// IsAuK reports whether the job uses Tencent AuK's generation/editing worker.
+func (j Job) IsAuK() bool { return j.Model == AuKModel }
+
+// InputPaths returns private, job-owned AuK input files recorded in params_json.
+// URL inputs and voice-library references are never returned: callers may
+// remove every path here without affecting shared assets.
+func (j Job) InputPaths() []string {
+	params := j.Params()
+	paths := make([]string, 0, 2)
+	for _, key := range []string{"audio_path", "prompt_audio_path"} {
+		if path, ok := params[key].(string); ok && strings.TrimSpace(path) != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
 
 // Store is the jobs data access object.
 type Store struct {
@@ -221,11 +240,10 @@ func (s *Store) Enqueue(ctx context.Context, in NewJob) (int64, error) {
 	if len(language) > MaxLanguageLen {
 		return 0, ErrLanguage
 	}
-	// Every engine renders from a voice except Breeze's design mode, which
-	// builds one from a written instruction and has no reference to attach.
-	// The column is nullable and ON DELETE SET NULL, so a NULL link is a shape
-	// every read path already handles.
-	if in.VoiceID <= 0 && !isBreezeDesign(in.Model, in.Params) {
+	// Conventional engines render from a voice. Breeze design and every AuK
+	// task are intentionally voiceless at the queue layer: AuK carries its own
+	// source/prompt audio in the job parameters when a task needs one.
+	if in.VoiceID <= 0 && !isBreezeDesign(in.Model, in.Params) && in.Model != AuKModel {
 		return 0, ErrNoVoice
 	}
 

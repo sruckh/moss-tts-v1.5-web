@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"mime/multipart"
 	"os"
 	"reflect"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/sruckh/timbre/internal/jobs"
+	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/voices"
 )
 
@@ -47,6 +50,39 @@ func postJob(t *testing.T, srv *Server, cookie *http.Cookie, form url.Values, ac
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+
+func postMultipartJob(t *testing.T, srv *Server, cookie *http.Cookie, fields map[string]string, files map[string][]byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write field %s: %v", key, err)
+		}
+	}
+	for field, data := range files {
+		part, err := writer.CreateFormFile(field, field+".wav")
+		if err != nil {
+			t.Fatalf("create file field %s: %v", field, err)
+		}
+		if _, err := part.Write(data); err != nil {
+			t.Fatalf("write file field %s: %v", field, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/jobs", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
@@ -897,5 +933,167 @@ func TestHiddenBreezeFieldsDoNotLeakIntoOtherEngines(t *testing.T) {
 				t.Errorf("params normalize = %v, want true", got)
 			}
 		})
+	}
+}
+
+
+func baseAuKFields(task string) map[string]string {
+	return map[string]string{
+		"model": jobs.AuKModel, "task": task,
+		"instruction": "perform the requested task", "model_variant": runpod.AuKVariantFlash,
+		"nfe": "4", "cfg_scale": "0", "response_delivery": runpod.AuKDeliveryBase64,
+		"seed": "7",
+	}
+}
+
+func TestCreateJobAuKTaskMatrix(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	valid := []struct {
+		name   string
+		task   string
+		fields map[string]string
+	}{
+		{"instruct", runpod.AuKTaskInstructTTS, nil},
+		{"zero shot", runpod.AuKTaskZeroShotTTS, map[string]string{"prompt_audio": "YQ==", "prompt_text": "sample"}},
+		{"content edit", runpod.AuKTaskContentEdit, map[string]string{"audio": "YQ=="}},
+		{"acoustic edit", runpod.AuKTaskAcousticEdit, map[string]string{"audio": "YQ=="}},
+		{"paralinguistic edit", runpod.AuKTaskParalinguisticEdit, map[string]string{"audio": "YQ=="}},
+		{"enhancement", runpod.AuKTaskEnhancement, map[string]string{"audio": "YQ=="}},
+		{"separation", runpod.AuKTaskSeparation, map[string]string{"audio": "YQ=="}},
+		{"auto instruct", runpod.AuKTaskAuto, nil},
+		{"auto zero shot", runpod.AuKTaskAuto, map[string]string{"prompt_audio": "YQ=="}},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := baseAuKFields(tc.task)
+			for key, value := range tc.fields {
+				fields[key] = value
+			}
+			rec := postMultipartJob(t, srv, cookie, fields, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%q", rec.Code, rec.Body.String())
+			}
+			var job jobs.Job
+			if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+				t.Fatalf("decode job: %v", err)
+			}
+			if job.Model != jobs.AuKModel || job.VoiceID != 0 || job.Text != fields["instruction"] {
+				t.Fatalf("job = %+v", job)
+			}
+			params := job.Params()
+			if params["task"] != tc.task || params["model_variant"] != runpod.AuKVariantFlash {
+				t.Fatalf("params = %#v", params)
+			}
+			// Flash coerces cfg_scale to 0 and pins nfe 4: the persisted job
+			// records what the render will actually use.
+			if params["cfg_scale"] != float64(0) || params["nfe"] != float64(4) {
+				t.Fatalf("flash defaults = %#v", params)
+			}
+		})
+	}
+}
+
+func TestCreateJobAuKValidation(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	tests := []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{"missing instruction", func(f map[string]string) { delete(f, "instruction") }},
+		{"zero shot missing prompt", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS }},
+		{"instruct source forbidden", func(f map[string]string) { f["audio"] = "YQ==" }},
+		{"edit missing source", func(f map[string]string) { f["task"] = runpod.AuKTaskContentEdit }},
+		{"edit prompt forbidden", func(f map[string]string) { f["task"] = runpod.AuKTaskContentEdit; f["audio"] = "YQ=="; f["prompt_audio"] = "YQ==" }},
+		{"auto bare source", func(f map[string]string) { f["task"] = runpod.AuKTaskAuto; f["audio"] = "YQ==" }},
+		{"prompt text alone", func(f map[string]string) { f["prompt_text"] = "orphan" }},
+		{"bad base64", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS; f["prompt_audio"] = "%%%" }},
+		{"bad URL scheme", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS; f["prompt_audio"] = "file:///etc/passwd" }},
+		{"bad task", func(f map[string]string) { f["task"] = "weave" }},
+		{"flash nfe", func(f map[string]string) { f["nfe"] = "9" }},
+		{"base nfe", func(f map[string]string) { f["model_variant"] = runpod.AuKVariantBase; f["nfe"] = "15"; f["cfg_scale"] = "2" }},
+		{"base cfg", func(f map[string]string) { f["model_variant"] = runpod.AuKVariantBase; f["nfe"] = "32"; f["cfg_scale"] = "6" }},
+		{"duration", func(f map[string]string) { f["gen_seconds"] = "301" }},
+		{"delivery", func(f map[string]string) { f["response_delivery"] = "mail" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := baseAuKFields(runpod.AuKTaskInstructTTS)
+			tc.mutate(fields)
+			rec := postMultipartJob(t, srv, cookie, fields, nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateJobAuKUploadPersistsPrivately(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	fields := baseAuKFields(runpod.AuKTaskContentEdit)
+	rec := postMultipartJob(t, srv, cookie, fields, map[string][]byte{"audio_file": []byte("RIFFtest")})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", rec.Code, rec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	paths := job.InputPaths()
+	if len(paths) != 1 {
+		t.Fatalf("input paths = %v", paths)
+	}
+	if !strings.HasPrefix(paths[0], filepath.Join(srv.cfg.AudioDir, "inputs")) {
+		t.Fatalf("input path %q is outside private input directory", paths[0])
+	}
+	if _, err := os.Stat(paths[0]); err != nil {
+		t.Fatalf("stored input: %v", err)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/jobs/"+strconv.FormatInt(job.ID, 10), nil)
+	deleteReq.AddCookie(cookie)
+	deleteReq.Header.Set("Accept", "application/json")
+	deleteRec := httptest.NewRecorder()
+	srv.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d", deleteRec.Code)
+	}
+	if _, err := os.Stat(paths[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("input remains after delete: %v", err)
+	}
+}
+
+func TestCreateJobAuKRejectsUploadAndDirectValueTogether(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	fields := baseAuKFields(runpod.AuKTaskContentEdit)
+	fields["audio"] = "YQ=="
+	rec := postMultipartJob(t, srv, cookie, fields, map[string][]byte{"audio_file": []byte("RIFFtest")})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+
+func TestCreateJobAuKURLEncodedWithoutFiles(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	form := url.Values{
+		"model": {jobs.AuKModel}, "task": {runpod.AuKTaskInstructTTS},
+		"instruction": {"urlencoded api request"}, "model_variant": {runpod.AuKVariantFlash},
+		"nfe": {"4"}, "cfg_scale": {"0"}, "response_delivery": {runpod.AuKDeliveryBase64},
+	}
+	rec := postJob(t, srv, cookie, form, "application/json")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if job.Model != jobs.AuKModel || job.Text != "urlencoded api request" {
+		t.Fatalf("job = %+v", job)
 	}
 }

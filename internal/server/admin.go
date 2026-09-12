@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sruckh/timbre/internal/auth"
+	"github.com/sruckh/timbre/internal/jobs"
 	"github.com/sruckh/timbre/internal/voices"
 	"github.com/sruckh/timbre/internal/web"
 )
@@ -541,18 +542,21 @@ func (s *Server) deleteAdminUser(ctx context.Context, userID int64) ([]string, e
 	}
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT audio_path FROM jobs WHERE user_id = ? AND audio_path IS NOT NULL AND audio_path <> ''", userID)
+		"SELECT COALESCE(audio_path, ''), COALESCE(params_json, '') FROM jobs WHERE user_id = ?", userID)
 	if err != nil {
 		return nil, fmt.Errorf("delete user: list audio: %w", err)
 	}
 	var audioPaths []string
 	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
+		var path, paramsJSON string
+		if err := rows.Scan(&path, &paramsJSON); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("delete user: scan audio: %w", err)
 		}
-		audioPaths = append(audioPaths, path)
+		if path != "" {
+			audioPaths = append(audioPaths, path)
+		}
+		audioPaths = append(audioPaths, (jobs.Job{ParamsJSON: paramsJSON}).InputPaths()...)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()

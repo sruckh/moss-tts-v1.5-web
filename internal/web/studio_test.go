@@ -205,6 +205,8 @@ func TestComposeEngineSelector(t *testing.T) {
 		`focus:ring-2`,
 		`value="MOSS-TTS v1.5" selected`,
 		`value="bosonai/higgs-tts-3-4b"`,
+		`value="BreezeBlue/Breeze-TTS-2"`,
+		`value="tencent/AuK"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("engine selector missing %q", want)
@@ -380,5 +382,42 @@ func TestVoiceGridContainerIsScrollableWithMaxHeight(t *testing.T) {
 	}
 	if !strings.Contains(html, "max-h-[670px]") {
 		t.Error("voice grid container missing max height constraint 'max-h-[670px]'")
+	}
+}
+
+
+func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
+	html := render(t, Compose(sampleVoices(), 1))
+	for _, want := range []string{
+		`enctype="multipart/form-data"`, `value="tencent/AuK"`,
+		`name="instruction"`, `name="task"`, `value="auto"`,
+		`value="zero_shot_tts"`, `value="instruct_tts"`,
+		`value="content_edit"`, `value="acoustic_edit"`,
+		`value="paralinguistic_edit"`, `value="enhancement"`, `value="separation"`,
+		`name="audio_file"`, `name="audio"`, `name="prompt_audio_file"`,
+		`name="prompt_audio"`, `name="prompt_text"`, `name="gen_seconds"`,
+		`name="gen_text"`, `name="model_variant"`, `value="flash"`, `value="base"`,
+		`name="nfe"`, `name="cfg_scale"`, `name="seed"`,
+		`name="response_delivery"`, `value="s3"`, `value="base64"`,
+		`decoded limit 15 MB`, `Run AuK task`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("AuK compose contract missing %q", want)
+		}
+	}
+}
+
+func TestComposeDisablesEngineSpecificFields(t *testing.T) {
+	html := render(t, Compose(sampleVoices(), 1))
+	for _, want := range []string{
+		`x-bind:disabled="!isAuK || !aukNeedsSource"`,
+		`x-bind:disabled="!isAuK || !aukAllowsPrompt"`,
+		`x-bind:disabled="isAuK"`,
+		`x-bind:disabled="!isBreeze"`,
+		`x-bind:disabled="!needsVoice"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("conditional field contract missing %q", want)
+		}
 	}
 }

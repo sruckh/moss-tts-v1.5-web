@@ -87,198 +87,189 @@ func takeByID(items []jobs.Job, id int64) (jobs.Job, bool) {
 	return jobs.Job{}, false
 }
 
-// Compose is the render form: the script editor (the widest, quietest surface)
-// with its Olive character meter, then the parameters around it — Model, Seed,
-// Pace, Pitch, Expressiveness, and the Output toggles. It posts to /jobs and
-// swaps the returned queue fragment in place.
+// Compose is the render form. AuK gets a dedicated task workspace because its
+// generation, editing, enhancement and separation contract is not a conventional
+// text-plus-voice TTS form.
 templ Compose(available []voices.Voice, selectedID int64) {
 	<form
 		hx-post="/jobs"
 		hx-target="#queue"
 		hx-swap="outerHTML"
+		enctype="multipart/form-data"
 		class="flex flex-col gap-6 rounded-container border border-line bg-surface-1 p-6"
-		x-data="{ script: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, engine: '', mode: 'clone', get isBreeze() { return this.engine === $refs.breezeModel.value }, get needsInstruct() { return this.isBreeze &amp;&amp; (this.mode === 'design' || this.mode === 'direction') }, get needsVoice() { return !this.isBreeze || this.mode !== 'design' }, tag(t) { this.script = this.script + t }, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
+		x-data="{ script: '', aukInstruction: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, engine: '', mode: 'clone', aukTask: 'instruct_tts', aukVariant: 'flash', nfe: '4', aukCfg: '0', get isBreeze() { return this.engine === $refs.breezeModel.value }, get isAuK() { return this.engine === $refs.aukModel.value }, get needsInstruct() { return this.isBreeze &amp;&amp; (this.mode === 'design' || this.mode === 'direction') }, get needsVoice() { return !this.isAuK &amp;&amp; (!this.isBreeze || this.mode !== 'design') }, get aukNeedsSource() { return ['content_edit','acoustic_edit','paralinguistic_edit','enhancement','separation'].includes(this.aukTask) }, get aukAllowsPrompt() { return this.aukTask === 'zero_shot_tts' || this.aukTask === 'auto' }, setAuKDefaults() { if (this.aukVariant === 'base') { this.nfe = '32'; this.aukCfg = '2'; } else { this.nfe = '4'; this.aukCfg = '0'; } }, tag(t) { this.script = this.script + t }, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
 	>
-		// Disabled inputs are not submitted, so design mode posts no voice_id at
-		// all — the worker rejects a reference in design and the job stores no
-		// voice link. The handler resolves mode before requiring a voice.
 		<input type="hidden" id="voice_id" name="voice_id" value={ strconv.FormatInt(selectedID, 10) } x-bind:disabled="!needsVoice"/>
-		<div>
-			<label class="field-label" for="script">Script</label>
-			<textarea
-				id="script"
-				name="text"
-				rows="6"
-				required
-				x-model="script"
-				x-ref="scriptBox"
-				:style="over ? 'border-color: var(--color-burnt)' : ''"
-				placeholder="Paste the script to render…"
-				class="input script-input"
-			></textarea>
-			<div class="count">
-				<span x-text="chars.toLocaleString() + ' / ' + limit.toLocaleString() + ' characters'">0 / 5,000 characters</span>
-				<span x-text="'≈ ' + est + ' at current pace'">≈ 0:00 at current pace</span>
-			</div>
-			<div class="meter"><i :style="'width:' + Math.min(100, (chars / limit) * 100) + '%'"></i></div>
-			<p class="help help--limit" x-show="over" x-cloak>
-				Past the 5,000-character limit. Split the script into two takes and render them in sequence.
-			</p>
-		</div>
 		<div class="grid gap-6 sm:grid-cols-2">
 			<div>
 				<label class="field-label" for="model">Engine</label>
-				<select
-					class="input focus:ring-2 focus:ring-indigo"
-					id="model"
-					name="model"
-					aria-label="Speech engine"
-					x-model="engine"
-				>
+				<select class="input focus:ring-2 focus:ring-indigo" id="model" name="model" aria-label="Speech engine" x-model="engine">
 					<option value={ jobs.DefaultModel } selected>MOSS-TTS v1.5</option>
 					<option value={ jobs.HiggsModel }>Higgs TTS 3.4B</option>
 					<option x-ref="breezeModel" value={ jobs.BreezeModel }>Breeze TTS 2</option>
+					<option x-ref="aukModel" value={ jobs.AuKModel }>Tencent AuK</option>
 				</select>
-				<p class="help">MOSS is the default. Higgs uses a cloned voice's stored reference transcript and recovers it in the background when needed. Breeze adds voice design and direction, and is a queued render like the others — not streaming.</p>
+				<p class="help" x-show="!isAuK">MOSS is the default. Higgs uses cloned references. Breeze adds clone, design and direction modes.</p>
+				<p class="help" x-show="isAuK" x-cloak>AuK is an audio Swiss knife: generate, clone, edit, enhance or separate audio through one queued workflow.</p>
 			</div>
 			<div x-show="isBreeze" x-cloak>
 				<label class="field-label" for="mode">Breeze mode</label>
-				<select
-					class="input focus:ring-2 focus:ring-indigo"
-					id="mode"
-					name="mode"
-					aria-label="Breeze synthesis mode"
-					x-model="mode"
-				>
+				<select class="input focus:ring-2 focus:ring-indigo" id="mode" name="mode" aria-label="Breeze synthesis mode" x-model="mode" x-bind:disabled="!isBreeze">
 					<option value="clone">Clone — copy a reference voice</option>
 					<option value="design">Design — build a voice from a description</option>
 					<option value="direction">Direction — clone, then steer the delivery</option>
 				</select>
 				<p class="help" x-text="mode === 'design' ? 'Design needs no reference voice — the description is the voice.' : 'Uses the selected voice and its stored reference transcript.'"></p>
 			</div>
+		</div>
+
+		<div x-show="!isAuK">
+			<label class="field-label" for="script">Script</label>
+			<textarea id="script" name="text" rows="6" required x-bind:disabled="isAuK" x-model="script" x-ref="scriptBox" :style="over ? 'border-color: var(--color-burnt)' : ''" placeholder="Paste the script to render…" class="input script-input"></textarea>
+			<div class="count">
+				<span x-text="chars.toLocaleString() + ' / ' + limit.toLocaleString() + ' characters'">0 / 5,000 characters</span>
+				<span x-text="'≈ ' + est + ' at current pace'">≈ 0:00 at current pace</span>
+			</div>
+			<div class="meter"><i :style="'width:' + Math.min(100, (chars / limit) * 100) + '%'"/></div>
+			<p class="help help--limit" x-show="over" x-cloak>Past the 5,000-character limit. Split the script into two takes and render them in sequence.</p>
+		</div>
+
+		<section x-show="isAuK" x-cloak class="grid gap-6 rounded-card border border-line bg-surface-2 p-5 sm:grid-cols-2" aria-label="Tencent AuK task controls">
+			<div class="sm:col-span-2">
+				<p class="eyebrow">AuK task</p>
+				<label class="field-label" for="auk_instruction">Instruction</label>
+				<textarea class="input script-input" id="auk_instruction" name="instruction" rows="4" x-model="aukInstruction" x-bind:disabled="!isAuK" x-bind:required="isAuK" placeholder="Describe exactly what AuK should generate, change, enhance or extract."></textarea>
+				<p class="help">AuK has no separate text field. Include the words to speak and the desired voice or edit in this instruction.</p>
+			</div>
+			<div>
+				<label class="field-label" for="auk_task">Mode</label>
+				<select class="input focus:ring-2 focus:ring-indigo" id="auk_task" name="task" x-model="aukTask" x-bind:disabled="!isAuK">
+					<option value="auto">Auto — infer generation from prompt presence</option>
+					<option value="zero_shot_tts">Zero-shot TTS — clone a prompt voice</option>
+					<option value="instruct_tts">Instruction TTS — design and speak</option>
+					<option value="content_edit">Content editing — replace, insert or delete</option>
+					<option value="acoustic_edit">Acoustic editing — pitch, speed or volume</option>
+					<option value="paralinguistic_edit">Paralinguistic editing — emotion, timbre and cues</option>
+					<option value="enhancement">Enhancement — denoise or dereverb</option>
+					<option value="separation">Separation — isolate a source or speaker</option>
+				</select>
+				<p class="help" x-text="aukNeedsSource ? 'This task requires source audio.' : (aukAllowsPrompt ? 'Prompt audio is optional in Auto and required for zero-shot TTS.' : 'This task takes the instruction alone.')"></p>
+			</div>
+			<div>
+				<label class="field-label" for="model_variant">Model variant</label>
+				<select class="input focus:ring-2 focus:ring-indigo" id="model_variant" name="model_variant" x-model="aukVariant" x-on:change="setAuKDefaults()" x-bind:disabled="!isAuK">
+					<option value="flash">Flash — fixed four-step distilled model</option>
+					<option value="base">Base — configurable flow-matching model</option>
+				</select>
+				<p class="help">Flash is the fast default. Base trades more diffusion steps for control.</p>
+			</div>
+
+			<div x-show="aukNeedsSource" x-cloak>
+				<label class="field-label" for="audio_file">Source audio upload</label>
+				<input class="input" id="audio_file" name="audio_file" type="file" accept="audio/*" x-bind:disabled="!isAuK || !aukNeedsSource"/>
+				<p class="help">Private, decoded limit 15 MB. Kept only until the queued job is submitted.</p>
+			</div>
+			<div x-show="aukNeedsSource" x-cloak>
+				<label class="field-label" for="audio">Source URL or base64</label>
+				<input class="input" id="audio" name="audio" type="text" x-bind:disabled="!isAuK || !aukNeedsSource" placeholder="https://… or data:audio/…;base64,…"/>
+				<p class="help">Use this instead of an upload. HTTP and HTTPS URLs are passed to the worker.</p>
+			</div>
+
+			<div x-show="aukAllowsPrompt" x-cloak>
+				<label class="field-label" for="prompt_audio_file">Prompt voice upload</label>
+				<input class="input" id="prompt_audio_file" name="prompt_audio_file" type="file" accept="audio/*" x-bind:disabled="!isAuK || !aukAllowsPrompt"/>
+				<p class="help">Required for zero-shot TTS; optional in Auto. Decoded limit 15 MB.</p>
+			</div>
+			<div x-show="aukAllowsPrompt" x-cloak>
+				<label class="field-label" for="prompt_audio">Prompt URL or base64</label>
+				<input class="input" id="prompt_audio" name="prompt_audio" type="text" x-bind:disabled="!isAuK || !aukAllowsPrompt" placeholder="https://… or data:audio/…;base64,…"/>
+				<p class="help">Use this instead of an upload.</p>
+			</div>
+			<div x-show="aukAllowsPrompt" x-cloak class="sm:col-span-2">
+				<label class="field-label" for="prompt_text">Prompt transcript</label>
+				<textarea class="input" id="prompt_text" name="prompt_text" rows="2" x-bind:disabled="!isAuK || !aukAllowsPrompt" placeholder="Exact transcript of the prompt clip (optional)."></textarea>
+			</div>
+
+			<div>
+				<label class="field-label" for="gen_seconds">Generation seconds</label>
+				<input class="input" id="gen_seconds" name="gen_seconds" type="number" min="0.5" max="300" step="0.1" x-bind:disabled="!isAuK" placeholder="Automatic"/>
+				<p class="help">Optional hard duration, from 0.5 to 300 seconds.</p>
+			</div>
+			<div>
+				<label class="field-label" for="gen_text">Duration text hint</label>
+				<input class="input" id="gen_text" name="gen_text" type="text" x-bind:disabled="!isAuK" placeholder="Text used by AuK's duration heuristic"/>
+				<p class="help">Optional; useful when the instruction contains prose around the words to speak.</p>
+			</div>
+			<div>
+				<label class="field-label" for="nfe">Diffusion steps (NFE)</label>
+				<input class="input" id="nfe" name="nfe" type="number" x-model="nfe" x-bind:min="aukVariant === 'base' ? 16 : 1" x-bind:max="aukVariant === 'base' ? 64 : 8" x-bind:disabled="!isAuK"/>
+				<p class="help" x-text="aukVariant === 'base' ? 'Base accepts 16–64; default 32.' : 'Flash accepts 1–8 but always executes four steps.'"></p>
+			</div>
+			<div>
+				<label class="field-label" for="auk_cfg_scale">Guidance (CFG)</label>
+				<input class="input" id="auk_cfg_scale" name="cfg_scale" type="number" step="0.1" x-model="aukCfg" x-bind:min="aukVariant === 'base' ? 1 : 0" x-bind:max="aukVariant === 'base' ? 5 : 0" x-bind:readonly="aukVariant === 'flash'" x-bind:disabled="!isAuK"/>
+				<p class="help" x-text="aukVariant === 'base' ? 'Base accepts 1.0–5.0; default 2.0.' : 'Flash always uses CFG 0.0.'"></p>
+			</div>
+			<div class="sm:col-span-2">
+				<label class="field-label" for="response_delivery">Audio delivery</label>
+				<select class="input focus:ring-2 focus:ring-indigo" id="response_delivery" name="response_delivery" x-bind:disabled="!isAuK">
+					<option value="auto">Auto — prefer presigned S3 when configured</option>
+					<option value="s3">S3 — require presigned delivery</option>
+					<option value="base64">Base64 — inline short audio</option>
+				</select>
+				<p class="help">Timbre downloads either result into your private local queue so playback outlives an expiring URL.</p>
+			</div>
+		</section>
+
+		<div class="grid gap-6 sm:grid-cols-2">
 			<div x-show="needsInstruct" x-cloak class="sm:col-span-2">
 				<label class="field-label" for="instruct">Voice instruction</label>
-				<textarea
-					class="input"
-					id="instruct"
-					name="instruct"
-					rows="2"
-					aria-label="Natural-language voice instruction"
-					placeholder="A warm, unhurried narrator with a low voice and a dry wit."
-				></textarea>
-				<p class="help">Plain language. Describes the voice for design, or how to steer the cloned speaker for direction.</p>
+				<textarea class="input" id="instruct" name="instruct" rows="2" aria-label="Natural-language voice instruction" x-bind:disabled="!needsInstruct" placeholder="A warm, unhurried narrator with a low voice and a dry wit."></textarea>
+				<p class="help">Describes the voice for design, or how to steer the cloned speaker for direction.</p>
 			</div>
 			<div x-show="isBreeze" x-cloak>
 				<label class="field-label" for="cfg_scale">Guidance (cfg_scale)</label>
-				<input class="input" id="cfg_scale" name="cfg_scale" value="4" inputmode="decimal" aria-label="Guidance scale"/>
-				<p class="help">The worker's default is 4. Higher follows the instruction more literally.</p>
+				<input class="input" id="cfg_scale" name="cfg_scale" value="4" inputmode="decimal" aria-label="Guidance scale" x-bind:disabled="!isBreeze"/>
+				<p class="help">The Breeze worker's default is 4.</p>
 			</div>
 			<div x-show="isBreeze" x-cloak class="sm:col-span-2">
 				<span class="field-label">Vocal events</span>
 				<div class="flex flex-wrap gap-2">
 					for _, cue := range []string{ "(laugh)", "(sigh)", "(cough)", "(clears throat)" } {
-						<button
-							type="button"
-							class="btn btn-ghost"
-							aria-label={ "Insert " + cue }
-							x-on:click={ "tag(' " + cue + " ')" }
-						>{ cue }</button>
+						<button type="button" class="btn btn-ghost" aria-label={ "Insert " + cue } x-on:click={ "tag(' " + cue + " ')" }>{ cue }</button>
 					}
 				</div>
-				<p class="help">Inserted into the script as-is. Your text is never rewritten. Chinese cues use square brackets — 
-					[笑]
-					, 
-					[叹气]
-					.</p>
+				<p class="help">Inserted into the script as-is. Your text is never rewritten.</p>
 			</div>
 			<div>
 				<label class="field-label" for="seed">Seed</label>
 				<input class="input" id="seed" name="seed" value="184203" inputmode="numeric"/>
 				<p class="help">Reuse a seed to reproduce a take exactly.</p>
 			</div>
-			<div>
-				<div class="range-head">
-					<label class="field-label" for="pace" style="margin:0">Pace</label>
-					<span class="range-val" x-text="(+pace).toFixed(2) + '×'">1.00×</span>
-				</div>
-				<input
-					class="range"
-					type="range"
-					id="pace"
-					name="pace"
-					min="0.5"
-					max="2"
-					step="0.05"
-					value="1"
-					x-model="pace"
-					x-init="rangeFill($el)"
-					@input="rangeFill($el)"
-				/>
+			<div x-show="!isAuK">
+				<div class="range-head"><label class="field-label" for="pace" style="margin:0">Pace</label><span class="range-val" x-text="(+pace).toFixed(2) + '×'">1.00×</span></div>
+				<input class="range" type="range" id="pace" name="pace" min="0.5" max="2" step="0.05" value="1" x-model="pace" x-bind:disabled="isAuK" x-init="rangeFill($el)" @input="rangeFill($el)"/>
 			</div>
-			<div>
-				<div class="range-head">
-					<label class="field-label" for="pitch" style="margin:0">Pitch</label>
-					<span class="range-val" x-text="(+pitch > 0 ? '+' : '') + pitch + ' st'">0 st</span>
-				</div>
-				<input
-					class="range"
-					type="range"
-					id="pitch"
-					name="pitch"
-					min="-12"
-					max="12"
-					step="1"
-					value="0"
-					x-model="pitch"
-					x-init="rangeFill($el)"
-					@input="rangeFill($el)"
-				/>
+			<div x-show="!isAuK">
+				<div class="range-head"><label class="field-label" for="pitch" style="margin:0">Pitch</label><span class="range-val" x-text="(+pitch > 0 ? '+' : '') + pitch + ' st'">0 st</span></div>
+				<input class="range" type="range" id="pitch" name="pitch" min="-12" max="12" step="1" value="0" x-model="pitch" x-bind:disabled="isAuK" x-init="rangeFill($el)" @input="rangeFill($el)"/>
 			</div>
-			<div>
-				<div class="range-head">
-					<label class="field-label" for="expr" style="margin:0">Expressiveness</label>
-					<span class="range-val" x-text="(+expr).toFixed(2)">0.65</span>
-				</div>
-				<input
-					class="range"
-					type="range"
-					id="expr"
-					name="expressiveness"
-					min="0"
-					max="1"
-					step="0.01"
-					value="0.65"
-					x-model="expr"
-					x-init="rangeFill($el)"
-					@input="rangeFill($el)"
-				/>
+			<div x-show="!isAuK">
+				<div class="range-head"><label class="field-label" for="expr" style="margin:0">Expressiveness</label><span class="range-val" x-text="(+expr).toFixed(2)">0.65</span></div>
+				<input class="range" type="range" id="expr" name="expressiveness" min="0" max="1" step="0.01" value="0.65" x-model="expr" x-bind:disabled="isAuK" x-init="rangeFill($el)" @input="rangeFill($el)"/>
 			</div>
-			<div>
+			<div x-show="!isAuK">
 				<span class="field-label">Output</span>
 				<div class="flex flex-wrap gap-6 pt-1">
-					<label class="sw-toggle">
-						<input type="checkbox" name="output_48k" checked/>
-						<span class="track"><span class="knob"></span></span>
-						<span class="text-[13.5px]">48 kHz WAV</span>
-					</label>
-					<label class="sw-toggle">
-						<input type="checkbox" name="normalize"/>
-						<span class="track"><span class="knob"></span></span>
-						<span class="text-[13.5px]">Normalize</span>
-					</label>
+					<label class="sw-toggle"><input type="checkbox" name="output_48k" checked x-bind:disabled="isAuK"/><span class="track"><span class="knob"/></span><span class="text-[13.5px]">48 kHz WAV</span></label>
+					<label class="sw-toggle"><input type="checkbox" name="normalize" x-bind:disabled="isAuK"/><span class="track"><span class="knob"/></span><span class="text-[13.5px]">Normalize</span></label>
 				</div>
 			</div>
 		</div>
 		<div class="flex flex-wrap items-center gap-3">
-			<button type="submit" class="btn">Render speech</button>
-			<button
-				type="button"
-				class="btn btn--quiet"
-				x-show="chars > 0"
-				x-cloak
-				@click="script = ''; $refs.scriptBox.focus()"
-			>Clear script</button>
-			<button type="reset" class="btn btn--quiet" @click="script = ''">Reset controls</button>
+			<button type="submit" class="btn" x-text="isAuK ? 'Run AuK task' : 'Render speech'">Render speech</button>
+			<button type="button" class="btn btn--quiet" x-show="!isAuK &amp;&amp; chars > 0" x-cloak @click="script = ''; $refs.scriptBox.focus()">Clear script</button>
+			<button type="reset" class="btn btn--quiet" @click="script = ''; aukInstruction = ''; aukTask = 'instruct_tts'; aukVariant = 'flash'; setAuKDefaults()">Reset controls</button>
 		</div>
 	</form>
 }

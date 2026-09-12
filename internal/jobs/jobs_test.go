@@ -121,6 +121,8 @@ func TestResolveModel(t *testing.T) {
 		{name: "whitespace defaults to MOSS", input: " \t ", want: DefaultModel},
 		{name: "explicit MOSS", input: DefaultModel, want: DefaultModel},
 		{name: "explicit Higgs", input: HiggsModel, want: HiggsModel},
+		{name: "explicit Breeze", input: BreezeModel, want: BreezeModel},
+		{name: "explicit AuK", input: AuKModel, want: AuKModel},
 		{name: "unknown", input: "other-engine", wantErr: true},
 	}
 

@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -139,6 +140,7 @@ type fakeSubmitter struct {
 	inputs       []runpod.Input
 	higgsInputs  []runpod.HiggsInput
 	breezeInputs []runpod.BreezeInput
+	aukInputs    []runpod.AuKInput
 	id           string
 	status       string
 	err          error
@@ -150,6 +152,27 @@ func (f *fakeSubmitter) SubmitBreeze(_ context.Context, in runpod.BreezeInput) (
 
 	f.calls++
 	f.breezeInputs = append(f.breezeInputs, in)
+	if f.err != nil {
+		return runpod.Submission{}, f.err
+	}
+	id := f.id
+	if id == "" {
+		id = fmt.Sprintf("runpod-%d", f.calls)
+	}
+	status := f.status
+	if status == "" {
+		status = runpod.StatusInQueue
+	}
+	return runpod.Submission{ID: id, Status: status}, nil
+}
+
+
+func (f *fakeSubmitter) SubmitAuK(_ context.Context, in runpod.AuKInput) (runpod.Submission, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	f.aukInputs = append(f.aukInputs, in)
 	if f.err != nil {
 		return runpod.Submission{}, f.err
 	}
@@ -1211,5 +1234,70 @@ func TestHTTPWhisperClientRejectsInvalidWordTimings(t *testing.T) {
 				t.Errorf("AlignOutput returned success %+v, want error for invalid timing", wt)
 			}
 		})
+	}
+}
+
+
+func TestSubmitRoutesAuKJobAndRemovesPrivateInput(t *testing.T) {
+	h := newHarness(t)
+	inputPath := filepath.Join(t.TempDir(), "source.wav")
+	if err := os.WriteFile(inputPath, []byte("RIFF-AUK"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := h.enqueueFull(t, 0, "enhance this speech", jobs.AuKModel, map[string]any{
+		"task": runpod.AuKTaskEnhancement, "audio_path": inputPath,
+		"model_variant": runpod.AuKVariantFlash, "nfe": 4,
+		"cfg_scale": 0, "response_delivery": runpod.AuKDeliveryBase64,
+	})
+	client := &fakeSubmitter{id: "auk-1"}
+	h.worker(client, 2).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted || got.RunPodID != "auk-1" {
+		t.Fatalf("job = %+v", got)
+	}
+	if len(client.aukInputs) != 1 || len(client.inputs) != 0 || len(client.higgsInputs) != 0 || len(client.breezeInputs) != 0 {
+		t.Fatalf("routes: auk=%d moss=%d higgs=%d breeze=%d", len(client.aukInputs), len(client.inputs), len(client.higgsInputs), len(client.breezeInputs))
+	}
+	in := client.aukInputs[0]
+	if in.Task != runpod.AuKTaskEnhancement || in.Audio != base64.StdEncoding.EncodeToString([]byte("RIFF-AUK")) {
+		t.Fatalf("AuK input = %+v", in)
+	}
+	if _, err := os.Stat(inputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("submitted input was not removed: %v", err)
+	}
+}
+
+func TestAuKTransientSubmitFailureRetainsInputForRetry(t *testing.T) {
+	h := newHarness(t)
+	inputPath := filepath.Join(t.TempDir(), "source.wav")
+	if err := os.WriteFile(inputPath, []byte("RIFF-AUK"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := h.enqueueFull(t, 0, "edit this", jobs.AuKModel, map[string]any{
+		"task": runpod.AuKTaskContentEdit, "audio_path": inputPath,
+		"model_variant": runpod.AuKVariantFlash, "nfe": 4,
+		"cfg_scale": 0, "response_delivery": runpod.AuKDeliveryBase64,
+	})
+	client := &fakeSubmitter{err: &runpod.Error{StatusCode: http.StatusServiceUnavailable}}
+	h.worker(client, 2).Tick(context.Background())
+	got := h.get(t, id)
+	if got.Status != jobs.StatusQueued || got.Attempts != 1 {
+		t.Fatalf("job = %+v", got)
+	}
+	if _, err := os.Stat(inputPath); err != nil {
+		t.Fatalf("retry input was removed: %v", err)
+	}
+}
+
+func TestBuildAuKInputPreservesURLAndParameters(t *testing.T) {
+	h := newHarness(t)
+	job := jobs.Job{Text: "say hello", Model: jobs.AuKModel, ParamsJSON: `{"task":"zero_shot_tts","prompt_audio":"https://example.test/prompt.wav","prompt_text":"hello","gen_seconds":2.5,"gen_text":"hello","model_variant":"base","nfe":32,"cfg_scale":2.5,"seed":99,"response_delivery":"s3"}`}
+	in, err := h.worker(&fakeSubmitter{}, 1).buildAuKInput(job)
+	if err != nil {
+		t.Fatalf("buildAuKInput: %v", err)
+	}
+	if in.PromptAudio != "https://example.test/prompt.wav" || in.PromptText != "hello" || in.ModelVariant != runpod.AuKVariantBase || in.NFE != 32 || in.CfgScale != 2.5 || in.Seed == nil || *in.Seed != 99 || in.ResponseDelivery != runpod.AuKDeliveryS3 {
+		t.Fatalf("AuK input = %+v", in)
 	}
 }

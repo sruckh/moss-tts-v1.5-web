@@ -1178,3 +1178,190 @@ func TestBreezeErrorIgnoresNonEnvelopeErrors(t *testing.T) {
 		t.Errorf("ErrorString = %q, want the raw RunPod reason preserved", got.ErrorString())
 	}
 }
+
+
+func validAuKInput(task string) AuKInput {
+	return NormalizeAuKInput(AuKInput{
+		Task:             task,
+		Instruction:      "perform the requested audio task",
+		ModelVariant:     AuKVariantFlash,
+		NFE:              4,
+		ResponseDelivery: AuKDeliveryAuto,
+	})
+}
+
+func TestValidateAuKInputTaskMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   AuKInput
+		wantErr bool
+	}{
+		{"instruct", validAuKInput(AuKTaskInstructTTS), false},
+		{"instruct forbids source", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.Audio = "YQ=="; return in }(), true},
+		{"zero shot", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; return in }(), false},
+		{"zero shot missing prompt", validAuKInput(AuKTaskZeroShotTTS), true},
+		{"zero shot forbids source", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; in.Audio = "YQ=="; return in }(), true},
+		{"content edit", func() AuKInput { in := validAuKInput(AuKTaskContentEdit); in.Audio = "YQ=="; return in }(), false},
+		{"acoustic edit", func() AuKInput { in := validAuKInput(AuKTaskAcousticEdit); in.Audio = "YQ=="; return in }(), false},
+		{"paralinguistic edit", func() AuKInput { in := validAuKInput(AuKTaskParalinguisticEdit); in.Audio = "YQ=="; return in }(), false},
+		{"enhancement", func() AuKInput { in := validAuKInput(AuKTaskEnhancement); in.Audio = "YQ=="; return in }(), false},
+		{"separation", func() AuKInput { in := validAuKInput(AuKTaskSeparation); in.Audio = "YQ=="; return in }(), false},
+		{"edit missing source", validAuKInput(AuKTaskContentEdit), true},
+		{"edit forbids prompt", func() AuKInput { in := validAuKInput(AuKTaskContentEdit); in.Audio = "YQ=="; in.PromptAudio = "YQ=="; return in }(), true},
+		{"auto instruct", validAuKInput(AuKTaskAuto), false},
+		{"auto zero shot", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.PromptAudio = "YQ=="; return in }(), false},
+		{"auto rejects bare source", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.Audio = "YQ=="; return in }(), true},
+		{"prompt text without prompt", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.PromptText = "hello"; return in }(), true},
+		{"missing instruction", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.Instruction = ""; return in }(), true},
+		{"invalid task", validAuKInput("weave"), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAuKInput(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateAuKInput() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAuKInputVariantAndDeliveryBounds(t *testing.T) {
+	seed := int64(-1)
+	tests := []struct {
+		name  string
+		mutate func(*AuKInput)
+	}{
+		{"flash nfe low", func(in *AuKInput) { in.NFE = -1 }},
+		{"flash nfe high", func(in *AuKInput) { in.NFE = 9 }},
+		{"base nfe low", func(in *AuKInput) { in.ModelVariant = AuKVariantBase; in.NFE = 15; in.CfgScale = 2 }},
+		{"base nfe high", func(in *AuKInput) { in.ModelVariant = AuKVariantBase; in.NFE = 65; in.CfgScale = 2 }},
+		{"base cfg low", func(in *AuKInput) { in.ModelVariant = AuKVariantBase; in.NFE = 32; in.CfgScale = .9 }},
+		{"base cfg high", func(in *AuKInput) { in.ModelVariant = AuKVariantBase; in.NFE = 32; in.CfgScale = 5.1 }},
+		{"bad variant", func(in *AuKInput) { in.ModelVariant = "turbo" }},
+		{"bad delivery", func(in *AuKInput) { in.ResponseDelivery = "mail" }},
+		{"negative seed", func(in *AuKInput) { in.Seed = &seed }},
+		{"duration low", func(in *AuKInput) { in.GenSeconds = .4 }},
+		{"duration high", func(in *AuKInput) { in.GenSeconds = 301 }},
+		{"invalid base64", func(in *AuKInput) { in.Task = AuKTaskZeroShotTTS; in.PromptAudio = "%%%" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := validAuKInput(AuKTaskInstructTTS)
+			tc.mutate(&in)
+			if err := ValidateAuKInput(in); err == nil {
+				t.Fatal("ValidateAuKInput() succeeded, want error")
+			}
+		})
+	}
+	// Flash never rejects a cfg_scale input: the documented worker behavior is
+	// "forced to 0.0 for flash", mirrored by NormalizeAuKInput.
+	forced := NormalizeAuKInput(AuKInput{Task: AuKTaskInstructTTS, Instruction: "x", CfgScale: 3})
+	if forced.CfgScale != 0 {
+		t.Errorf("flash cfg_scale = %v, want forced 0", forced.CfgScale)
+	}
+	for _, nfe := range []int{1, 8} {
+		in := validAuKInput(AuKTaskInstructTTS)
+		in.NFE = nfe
+		if err := ValidateAuKInput(in); err != nil {
+			t.Errorf("flash boundary nfe=%d: %v", nfe, err)
+		}
+	}
+	for _, nfe := range []int{16, 64} {
+		in := validAuKInput(AuKTaskInstructTTS)
+		in.ModelVariant, in.NFE, in.CfgScale = AuKVariantBase, nfe, 2
+		if err := ValidateAuKInput(in); err != nil {
+			t.Errorf("base boundary nfe=%d: %v", nfe, err)
+		}
+	}
+}
+
+func TestSubmitAuKPayloadAndDistinctEndpoint(t *testing.T) {
+	var got map[string]any
+	var auth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		got = decodeSubmission(t, r)
+		_, _ = io.WriteString(w, `{"id":"auk-1","status":"IN_QUEUE"}`)
+	}))
+	defer server.Close()
+	seed := int64(42)
+	in := AuKInput{
+		Task: AuKTaskZeroShotTTS, Instruction: `Say "hello" with the same voice.`,
+		PromptAudio: "YQ==", PromptText: "sample", GenSeconds: 2.5,
+		GenText: "hello", ModelVariant: AuKVariantBase, NFE: 32,
+		CfgScale: 2.5, Seed: &seed, ResponseDelivery: AuKDeliveryS3,
+	}
+	client := New("", "shared", WithAuKEndpoint(server.URL), WithHTTPClient(server.Client()))
+	submission, err := client.SubmitAuK(context.Background(), in)
+	if err != nil {
+		t.Fatalf("SubmitAuK: %v", err)
+	}
+	if submission.ID != "auk-1" || auth != "Bearer shared" {
+		t.Fatalf("submission/auth = %+v / %q", submission, auth)
+	}
+	for key, want := range map[string]any{
+		"task": AuKTaskZeroShotTTS, "instruction": in.Instruction,
+		"prompt_audio": "YQ==", "prompt_text": "sample",
+		"gen_seconds": 2.5, "gen_text": "hello", "model_variant": AuKVariantBase,
+		"nfe": float64(32), "cfg_scale": 2.5, "seed": float64(42),
+		"response_delivery": AuKDeliveryS3,
+	} {
+		if got[key] != want {
+			t.Errorf("payload[%q] = %#v, want %#v", key, got[key], want)
+		}
+	}
+	if _, ok := got["audio"]; ok {
+		t.Error("zero-shot payload unexpectedly contains audio")
+	}
+}
+
+func TestAuKEndpointStatusHealthAndConfiguration(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/status/") {
+			_, _ = io.WriteString(w, `{"id":"auk-1","status":"COMPLETED","output":{"delivery":"s3","audio_url":"https://example.test/a.wav","sample_rate":24000,"model_variant":"flash","nfe":4,"task_executed":"instruct_tts","url_expires_at":"2026-09-13T00:00:00Z"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"jobs":{},"workers":{}}`)
+	}))
+	defer server.Close()
+	client := New("", "key", WithAuKEndpoint(server.URL), WithHTTPClient(server.Client()))
+	if !client.AuKConfigured() {
+		t.Fatal("AuKConfigured() = false")
+	}
+	status, err := client.StatusAuK(context.Background(), "auk-1")
+	if err != nil {
+		t.Fatalf("StatusAuK: %v", err)
+	}
+	if status.Output.AudioURL == "" || status.Output.TaskExecuted != AuKTaskInstructTTS || status.Output.NFE != 4 {
+		t.Fatalf("status output = %+v", status.Output)
+	}
+	if _, err := client.HealthAuK(context.Background()); err != nil {
+		t.Fatalf("HealthAuK: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "/status/auk-1" || paths[1] != "/health" {
+		t.Fatalf("paths = %v", paths)
+	}
+	missing := New("", "key")
+	if missing.AuKConfigured() {
+		t.Fatal("AuKConfigured() = true without endpoint")
+	}
+	if _, err := missing.SubmitAuK(context.Background(), validAuKInput(AuKTaskInstructTTS)); !errors.Is(err, ErrNoAuKEndpoint) {
+		t.Fatalf("SubmitAuK missing endpoint error = %v", err)
+	}
+	if !IsPermanent(ErrNoAuKEndpoint) {
+		t.Fatal("ErrNoAuKEndpoint must be permanent")
+	}
+}
+
+func TestAuKErrorEnvelopeParsing(t *testing.T) {
+	sr := StatusResult{Error: `{"code":"missing_required_field","message":"instruction is required","field":"instruction"}`}
+	env := sr.AuKError()
+	if env == nil || env.Code != "missing_required_field" || env.Field != "instruction" {
+		t.Fatalf("AuKError() = %+v", env)
+	}
+	if got := env.Error(); !strings.Contains(got, "instruction is required") {
+		t.Fatalf("error text = %q", got)
+	}
+}

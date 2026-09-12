@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +72,11 @@ func (m *mockStatusClient) StatusHiggs(ctx context.Context, id string) (runpod.S
 }
 
 func (m *mockStatusClient) StatusBreeze(ctx context.Context, id string) (runpod.StatusResult, error) {
+	return m.fn(ctx, id)
+}
+
+
+func (m *mockStatusClient) StatusAuK(ctx context.Context, id string) (runpod.StatusResult, error) {
 	return m.fn(ctx, id)
 }
 
@@ -318,6 +325,7 @@ type routingStatusClient struct {
 	statusCalls       int
 	statusHiggsCalls  int
 	statusBreezeCalls int
+	statusAuKCalls    int
 	result            runpod.StatusResult
 	err               error
 }
@@ -337,22 +345,28 @@ func (r *routingStatusClient) StatusBreeze(context.Context, string) (runpod.Stat
 	return r.result, r.err
 }
 
+
+func (r *routingStatusClient) StatusAuK(context.Context, string) (runpod.StatusResult, error) {
+	r.statusAuKCalls++
+	return r.result, r.err
+}
+
 // TestPollerRoutesByEngineModel asserts a Higgs job is polled through
 // StatusHiggs and a MOSS job through Status.
 func TestPollerRoutesByEngineModel(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 
 	cases := []struct {
-		name       string
-		model      string
-		wantMoss   int
-		wantHiggs  int
-		wantBreeze int
+		name                         string
+		model                        string
+		wantMoss, wantHiggs          int
+		wantBreeze, wantAuK          int
 	}{
-		{"moss", jobs.DefaultModel, 1, 0, 0},
-		{"blank defaults to moss", "", 1, 0, 0},
-		{"higgs", jobs.HiggsModel, 0, 1, 0},
-		{"breeze", jobs.BreezeModel, 0, 0, 1},
+		{"moss", jobs.DefaultModel, 1, 0, 0, 0},
+		{"blank defaults to moss", "", 1, 0, 0, 0},
+		{"higgs", jobs.HiggsModel, 0, 1, 0, 0},
+		{"breeze", jobs.BreezeModel, 0, 0, 1, 0},
+		{"auk", jobs.AuKModel, 0, 0, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,14 +376,11 @@ func TestPollerRoutesByEngineModel(t *testing.T) {
 
 			NewPoller(store, client, t.TempDir(), log, WithPollerInterval(10)).Tick(context.Background())
 
-			if client.statusCalls != tc.wantMoss {
-				t.Errorf("Status calls = %d, want %d", client.statusCalls, tc.wantMoss)
-			}
-			if client.statusHiggsCalls != tc.wantHiggs {
-				t.Errorf("StatusHiggs calls = %d, want %d", client.statusHiggsCalls, tc.wantHiggs)
-			}
-			if client.statusBreezeCalls != tc.wantBreeze {
-				t.Errorf("StatusBreeze calls = %d, want %d", client.statusBreezeCalls, tc.wantBreeze)
+			if client.statusCalls != tc.wantMoss || client.statusHiggsCalls != tc.wantHiggs ||
+				client.statusBreezeCalls != tc.wantBreeze || client.statusAuKCalls != tc.wantAuK {
+				t.Errorf("route counts moss/higgs/breeze/auk = %d/%d/%d/%d, want %d/%d/%d/%d",
+					client.statusCalls, client.statusHiggsCalls, client.statusBreezeCalls, client.statusAuKCalls,
+					tc.wantMoss, tc.wantHiggs, tc.wantBreeze, tc.wantAuK)
 			}
 		})
 	}
@@ -614,5 +625,76 @@ func TestPollerBreezeAlignmentFailureStillMarksReady(t *testing.T) {
 	}
 	if store.failed[92] != "" {
 		t.Errorf("failed[92] = %q, want job not failed on alignment error", store.failed[92])
+	}
+}
+
+
+func TestPollerAuKS3CompletionDownloadsAndAlignsTTS(t *testing.T) {
+	audio := []byte("RIFF-AUK-DOWNLOAD")
+	download := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(audio)
+	}))
+	defer download.Close()
+	job := jobs.Job{ID: 93, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-93", Model: jobs.AuKModel, ParamsJSON: `{"task":"instruct_tts"}`}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{fn: func(context.Context, string) (runpod.StatusResult, error) {
+		return runpod.StatusResult{Status: runpod.StatusCompleted, Output: runpod.Output{
+			Delivery: runpod.AuKDeliveryS3, AudioURL: download.URL + "/audio.wav",
+			SampleRate: 24000, TaskExecuted: runpod.AuKTaskInstructTTS,
+		}}, nil
+	}}
+	alignCalls := 0
+	aligner := &mockAligner{fn: func(context.Context, []byte) (*runpod.WordTimings, error) {
+		alignCalls++
+		return &runpod.WordTimings{Words: []runpod.WordTiming{{W: "hello", Start: 0, End: 1}}}, nil
+	}}
+	NewPoller(store, client, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)), WithPollerAligner(aligner)).Tick(context.Background())
+	if alignCalls != 1 || store.ready[job.ID] == "" || store.alignment[job.ID] == "" {
+		t.Fatalf("alignCalls=%d ready=%q alignment=%q failed=%q", alignCalls, store.ready[job.ID], store.alignment[job.ID], store.failed[job.ID])
+	}
+	got, err := os.ReadFile(store.audioPaths[job.ID])
+	if err != nil || string(got) != string(audio) {
+		t.Fatalf("saved audio=%q err=%v", got, err)
+	}
+}
+
+func TestPollerAuKEditingCompletionSkipsAlignment(t *testing.T) {
+	audio := base64.StdEncoding.EncodeToString([]byte("RIFF-EDIT"))
+	job := jobs.Job{ID: 94, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-94", Model: jobs.AuKModel, ParamsJSON: `{"task":"content_edit"}`}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{fn: func(context.Context, string) (runpod.StatusResult, error) {
+		return runpod.StatusResult{Status: runpod.StatusCompleted, Output: runpod.Output{AudioBase64: audio, TaskExecuted: runpod.AuKTaskContentEdit}}, nil
+	}}
+	alignCalls := 0
+	aligner := &mockAligner{fn: func(context.Context, []byte) (*runpod.WordTimings, error) {
+		alignCalls++
+		return nil, nil
+	}}
+	NewPoller(store, client, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)), WithPollerAligner(aligner)).Tick(context.Background())
+	if alignCalls != 0 || store.ready[job.ID] == "" {
+		t.Fatalf("alignCalls=%d ready=%q failed=%q", alignCalls, store.ready[job.ID], store.failed[job.ID])
+	}
+}
+
+func TestPollerAuKFailureUsesJSONStringEnvelope(t *testing.T) {
+	job := jobs.Job{ID: 95, UserID: 1, Status: jobs.StatusSubmitted, RunPodID: "rp-95", Model: jobs.AuKModel}
+	store := newMockPollerStore(job)
+	client := &mockStatusClient{fn: func(context.Context, string) (runpod.StatusResult, error) {
+		return runpod.StatusResult{Status: runpod.StatusFailed, Error: `{"code":"audio_too_large","message":"audio exceeds limit","field":"audio"}`}, nil
+	}}
+	NewPoller(store, client, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil))).Tick(context.Background())
+	if got := store.failed[job.ID]; !strings.Contains(got, "audio_too_large") || !strings.Contains(got, "audio exceeds limit") {
+		t.Fatalf("failure = %q", got)
+	}
+}
+
+func TestOutputAudioRejectsOversizeURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "70000000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if _, err := outputAudio(context.Background(), runpod.Output{AudioURL: server.URL}); err == nil {
+		t.Fatal("outputAudio succeeded for oversized response")
 	}
 }

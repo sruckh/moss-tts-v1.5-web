@@ -139,3 +139,32 @@ func TestLoadBreezeEndpointDefaultsEmpty(t *testing.T) {
 			cfg.BreezeRunPodEndpoint, BreezeRunPodEndpointEnv)
 	}
 }
+
+
+func TestLoadAuKEndpoint(t *testing.T) {
+	t.Setenv(RunPodEndpointEnv, "https://api.runpod.ai/v2/moss-id")
+	t.Setenv(HiggsRunPodEndpointEnv, "https://api.runpod.ai/v2/higgs-id")
+	t.Setenv(BreezeRunPodEndpointEnv, "https://api.runpod.ai/v2/breeze-id")
+	t.Setenv(AuKRunPodEndpointEnv, "https://api.runpod.ai/v2/auk-id/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuKRunPodEndpoint != "https://api.runpod.ai/v2/auk-id" {
+		t.Fatalf("AuKRunPodEndpoint = %q", cfg.AuKRunPodEndpoint)
+	}
+	if cfg.RunPodEndpoint != "https://api.runpod.ai/v2/moss-id" || cfg.HiggsRunPodEndpoint != "https://api.runpod.ai/v2/higgs-id" || cfg.BreezeRunPodEndpoint != "https://api.runpod.ai/v2/breeze-id" {
+		t.Fatalf("existing endpoints changed: %+v", cfg)
+	}
+}
+
+func TestLoadAuKEndpointDefaultsEmpty(t *testing.T) {
+	t.Setenv(AuKRunPodEndpointEnv, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AuKRunPodEndpoint != "" {
+		t.Fatalf("AuKRunPodEndpoint = %q, want empty", cfg.AuKRunPodEndpoint)
+	}
+}

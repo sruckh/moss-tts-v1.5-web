@@ -22,7 +22,9 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,6 +35,8 @@ const (
 	StatusInProgress = "IN_PROGRESS"
 	StatusCompleted  = "COMPLETED"
 	StatusFailed     = "FAILED"
+	StatusCancelled  = "CANCELLED"
+	StatusTimedOut   = "TIMED_OUT"
 )
 
 // defaultTimeout bounds a single call. /run only enqueues, so it answers fast;
@@ -50,6 +54,7 @@ var (
 	ErrNoEndpoint       = errors.New("runpod: no endpoint configured (set RUNPOD_ENDPOINT)")
 	ErrNoHiggsEndpoint  = errors.New("runpod: no Higgs endpoint configured (set HIGGS_RUNPOD_ENDPOINT)")
 	ErrNoBreezeEndpoint = errors.New("runpod: no Breeze endpoint configured (set BREEZE_RUNPOD_ENDPOINT)")
+	ErrNoAuKEndpoint    = errors.New("runpod: no AuK endpoint configured (set AUK_RUNPOD_ENDPOINT)")
 	ErrNoAPIKey         = errors.New("runpod: no API key configured (set RUNPOD_API_KEY)")
 )
 
@@ -118,7 +123,7 @@ func (e *BreezeValidationError) Error() string { return "runpod: " + e.Reason }
 // IsPermanent reports whether err is a failure that retrying cannot fix.
 func IsPermanent(err error) bool {
 	if errors.Is(err, ErrNoEndpoint) || errors.Is(err, ErrNoHiggsEndpoint) ||
-		errors.Is(err, ErrNoBreezeEndpoint) || errors.Is(err, ErrNoAPIKey) {
+		errors.Is(err, ErrNoBreezeEndpoint) || errors.Is(err, ErrNoAuKEndpoint) || errors.Is(err, ErrNoAPIKey) {
 		return true
 	}
 	var apiErr *Error
@@ -135,6 +140,10 @@ func IsPermanent(err error) bool {
 	}
 	var breezeValErr *BreezeValidationError
 	if errors.As(err, &breezeValErr) {
+		return true
+	}
+	var aukValErr *AuKValidationError
+	if errors.As(err, &aukValErr) {
 		return true
 	}
 	return false
@@ -530,6 +539,241 @@ func ValidateBreezeInput(in BreezeInput) error {
 	return ValidateBreezeReferences(in.References)
 }
 
+
+// AuKModel is the RunPod model identifier recorded in jobs.model.
+const AuKModel = "tencent/AuK"
+
+// AuK task names are the worker's closed schema_validator.py set.
+const (
+	AuKTaskAuto              = "auto"
+	AuKTaskZeroShotTTS       = "zero_shot_tts"
+	AuKTaskInstructTTS       = "instruct_tts"
+	AuKTaskContentEdit       = "content_edit"
+	AuKTaskAcousticEdit      = "acoustic_edit"
+	AuKTaskParalinguisticEdit = "paralinguistic_edit"
+	AuKTaskEnhancement       = "enhancement"
+	AuKTaskSeparation        = "separation"
+
+	AuKVariantFlash = "flash"
+	AuKVariantBase  = "base"
+
+	AuKDeliveryAuto   = "auto"
+	AuKDeliveryS3     = "s3"
+	AuKDeliveryBase64 = "base64"
+)
+
+// AuKMaxAudioBytes mirrors the worker's decoded per-clip limit.
+const AuKMaxAudioBytes = 15 << 20
+
+// AuKValidationError is a permanent caller-side payload failure.
+type AuKValidationError struct {
+	Reason string
+}
+
+func (e *AuKValidationError) Error() string { return "runpod: invalid AuK input: " + e.Reason }
+
+// AuKInput is the worker's complete input object. Audio and PromptAudio are
+// either base64/data URLs or HTTP(S) URLs; local files are encoded by the
+// submission worker before this value reaches the client.
+type AuKInput struct {
+	Task             string
+	Instruction      string
+	Audio            string
+	PromptAudio      string
+	PromptText       string
+	GenSeconds       float64
+	GenText          string
+	ModelVariant     string
+	NFE              int
+	CfgScale         float64
+	Seed             *int64
+	ResponseDelivery string
+}
+
+func (in AuKInput) MarshalJSON() ([]byte, error) {
+	if err := ValidateAuKInput(in); err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"task":              in.Task,
+		"instruction":       in.Instruction,
+		"model_variant":     in.ModelVariant,
+		"nfe":               in.NFE,
+		"cfg_scale":         in.CfgScale,
+		"response_delivery": in.ResponseDelivery,
+	}
+	if in.Audio != "" {
+		payload["audio"] = in.Audio
+	}
+	if in.PromptAudio != "" {
+		payload["prompt_audio"] = in.PromptAudio
+	}
+	if in.PromptText != "" {
+		payload["prompt_text"] = in.PromptText
+	}
+	if in.GenSeconds != 0 {
+		payload["gen_seconds"] = in.GenSeconds
+	}
+	if in.GenText != "" {
+		payload["gen_text"] = in.GenText
+	}
+	if in.Seed != nil {
+		payload["seed"] = *in.Seed
+	}
+	return json.Marshal(payload)
+}
+
+// NormalizeAuKInput resolves the documented worker defaults so persisted jobs
+// produce deterministic payloads even if endpoint defaults change later.
+func NormalizeAuKInput(in AuKInput) AuKInput {
+	if strings.TrimSpace(in.Task) == "" {
+		in.Task = AuKTaskAuto
+	}
+	if strings.TrimSpace(in.ModelVariant) == "" {
+		in.ModelVariant = AuKVariantFlash
+	}
+	if strings.TrimSpace(in.ResponseDelivery) == "" {
+		in.ResponseDelivery = AuKDeliveryAuto
+	}
+	if in.ModelVariant == AuKVariantBase {
+		if in.NFE == 0 {
+			in.NFE = 32
+		}
+		if in.CfgScale == 0 {
+			in.CfgScale = 2
+		}
+	} else {
+		if in.NFE == 0 {
+			in.NFE = 4
+		}
+		in.CfgScale = 0
+	}
+	return in
+}
+
+// ResolveAuKTask applies the worker's conservative auto-mode resolver.
+func ResolveAuKTask(in AuKInput) (string, error) {
+	task := strings.TrimSpace(in.Task)
+	if task == "" || task == AuKTaskAuto {
+		switch {
+		case in.PromptAudio != "":
+			return AuKTaskZeroShotTTS, nil
+		case in.Audio != "":
+			return "", &AuKValidationError{Reason: "auto mode cannot infer an edit task from source audio"}
+		default:
+			return AuKTaskInstructTTS, nil
+		}
+	}
+	for _, allowed := range []string{
+		AuKTaskZeroShotTTS, AuKTaskInstructTTS, AuKTaskContentEdit,
+		AuKTaskAcousticEdit, AuKTaskParalinguisticEdit,
+		AuKTaskEnhancement, AuKTaskSeparation,
+	} {
+		if task == allowed {
+			return task, nil
+		}
+	}
+	return "", &AuKValidationError{Reason: "unknown task " + strconv.Quote(task)}
+}
+
+func validateAuKAudio(value, field string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		return nil
+	}
+	encoded := value
+	if strings.HasPrefix(encoded, "data:") {
+		comma := strings.IndexByte(encoded, ',')
+		if comma < 0 || !strings.Contains(encoded[:comma], ";base64") {
+			return &AuKValidationError{Reason: field + " must be base64, a base64 data URL, or an HTTP(S) URL"}
+		}
+		encoded = encoded[comma+1:]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 {
+		return &AuKValidationError{Reason: field + " is not valid base64 or an HTTP(S) URL"}
+	}
+	if len(decoded) > AuKMaxAudioBytes {
+		return &AuKValidationError{Reason: fmt.Sprintf("%s is %d bytes decoded (max %d)", field, len(decoded), AuKMaxAudioBytes)}
+	}
+	return nil
+}
+
+// ValidateAuKInput mirrors the worker's fail-fast task matrix and numeric
+// bounds. The first failing rule wins.
+func ValidateAuKInput(in AuKInput) error {
+	in = NormalizeAuKInput(in)
+	if strings.TrimSpace(in.Instruction) == "" {
+		return &AuKValidationError{Reason: "instruction is required"}
+	}
+	if err := validateAuKAudio(in.Audio, "audio"); err != nil {
+		return err
+	}
+	if err := validateAuKAudio(in.PromptAudio, "prompt_audio"); err != nil {
+		return err
+	}
+	task, err := ResolveAuKTask(in)
+	if err != nil {
+		return err
+	}
+	switch task {
+	case AuKTaskZeroShotTTS:
+		if in.PromptAudio == "" {
+			return &AuKValidationError{Reason: "zero_shot_tts requires prompt_audio"}
+		}
+		if in.Audio != "" {
+			return &AuKValidationError{Reason: "zero_shot_tts forbids audio"}
+		}
+	case AuKTaskInstructTTS:
+		if in.Audio != "" || in.PromptAudio != "" {
+			return &AuKValidationError{Reason: "instruct_tts forbids audio and prompt_audio"}
+		}
+	case AuKTaskContentEdit, AuKTaskAcousticEdit, AuKTaskParalinguisticEdit, AuKTaskEnhancement, AuKTaskSeparation:
+		if in.Audio == "" {
+			return &AuKValidationError{Reason: task + " requires audio"}
+		}
+		if in.PromptAudio != "" {
+			return &AuKValidationError{Reason: task + " forbids prompt_audio"}
+		}
+	}
+	if in.PromptText != "" && in.PromptAudio == "" {
+		return &AuKValidationError{Reason: "prompt_text is valid only with prompt_audio"}
+	}
+	if in.GenSeconds != 0 && (in.GenSeconds < 0.5 || in.GenSeconds > 300) {
+		return &AuKValidationError{Reason: "gen_seconds must be between 0.5 and 300"}
+	}
+	switch in.ModelVariant {
+	case AuKVariantFlash:
+		if in.NFE < 1 || in.NFE > 8 {
+			return &AuKValidationError{Reason: "flash nfe must be between 1 and 8"}
+		}
+		if in.CfgScale != 0 {
+			return &AuKValidationError{Reason: "flash cfg_scale must be 0"}
+		}
+	case AuKVariantBase:
+		if in.NFE < 16 || in.NFE > 64 {
+			return &AuKValidationError{Reason: "base nfe must be between 16 and 64"}
+		}
+		if in.CfgScale < 1 || in.CfgScale > 5 {
+			return &AuKValidationError{Reason: "base cfg_scale must be between 1 and 5"}
+		}
+	default:
+		return &AuKValidationError{Reason: "model_variant must be flash or base"}
+	}
+	if in.Seed != nil && *in.Seed < 0 {
+		return &AuKValidationError{Reason: "seed must be non-negative"}
+	}
+	switch in.ResponseDelivery {
+	case AuKDeliveryAuto, AuKDeliveryS3, AuKDeliveryBase64:
+	default:
+		return &AuKValidationError{Reason: "response_delivery must be auto, s3 or base64"}
+	}
+	return nil
+}
+
 // Submission is the response to POST /run.
 type Submission struct {
 	ID     string `json:"id"`
@@ -556,14 +800,13 @@ type Health struct {
 
 // Client talks to one serverless endpoint.
 type Client struct {
-	// mossEndpoint, higgsEndpoint and breezeEndpoint are three separately
-	// deployed RunPod Serverless endpoints. Requests are routed to one of them
-	// by which method is called (Submit/Status vs SubmitHiggs/StatusHiggs vs
-	// SubmitBreeze/StatusBreeze); all three share this client's HTTP transport
-	// and bearer token.
+	// Each engine is a separately deployed RunPod Serverless endpoint. The
+	// method called selects the endpoint; all engines share this client's HTTP
+	// transport and bearer token.
 	mossEndpoint   string
 	higgsEndpoint  string
 	breezeEndpoint string
+	aukEndpoint    string
 	apiKey         string
 	http           *http.Client
 }
@@ -591,6 +834,13 @@ func WithBreezeEndpoint(endpoint string) Option {
 	return func(c *Client) { c.breezeEndpoint = strings.TrimRight(endpoint, "/") }
 }
 
+
+// WithAuKEndpoint sets the dedicated Tencent AuK endpoint used by
+// SubmitAuK, StatusAuK and HealthAuK.
+func WithAuKEndpoint(endpoint string) Option {
+	return func(c *Client) { c.aukEndpoint = strings.TrimRight(endpoint, "/") }
+}
+
 // New builds a client for endpoint (e.g. https://api.runpod.ai/v2/<id>) using
 // apiKey as the bearer token. Both may be empty; the resulting client fails
 // every call with ErrNoEndpoint / ErrNoAPIKey rather than panicking, so the app
@@ -610,6 +860,12 @@ func New(endpoint, apiKey string, opts ...Option) *Client {
 // Configured reports whether both the endpoint and the key are present.
 func (c *Client) Configured() bool {
 	return c.mossEndpoint != "" && c.apiKey != ""
+}
+
+
+// AuKConfigured reports whether the dedicated AuK endpoint and shared key are present.
+func (c *Client) AuKConfigured() bool {
+	return c.aukEndpoint != "" && c.apiKey != ""
 }
 
 // Submit posts the job to /run and returns the async id RunPod assigns. It does
@@ -683,10 +939,47 @@ func (c *Client) SubmitBreeze(ctx context.Context, in BreezeInput) (Submission, 
 	return out, nil
 }
 
+
+// SubmitAuK queues one Tencent AuK generation/editing job.
+func (c *Client) SubmitAuK(ctx context.Context, in AuKInput) (Submission, error) {
+	if c.aukEndpoint == "" {
+		return Submission{}, ErrNoAuKEndpoint
+	}
+	in = NormalizeAuKInput(in)
+	if err := ValidateAuKInput(in); err != nil {
+		return Submission{}, err
+	}
+	body, err := json.Marshal(map[string]any{"input": in})
+	if err != nil {
+		return Submission{}, fmt.Errorf("runpod: encode AuK submission: %w", err)
+	}
+	var out Submission
+	if err := c.do(ctx, http.MethodPost, c.aukEndpoint, "/run", body, &out); err != nil {
+		return Submission{}, err
+	}
+	if out.ID == "" {
+		return Submission{}, errors.New("runpod: /run returned no job id")
+	}
+	return out, nil
+}
+
 // Health probes the endpoint's worker pool and queue depth.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var out Health
 	if err := c.do(ctx, http.MethodGet, c.mossEndpoint, "/health", nil, &out); err != nil {
+		return Health{}, err
+	}
+	return out, nil
+}
+
+
+// HealthAuK queries the dedicated Tencent AuK endpoint health snapshot.
+func (c *Client) HealthAuK(ctx context.Context) (Health, error) {
+	if c.aukEndpoint == "" {
+		return Health{}, ErrNoAuKEndpoint
+	}
+	var out Health
+	if err := c.do(ctx, http.MethodGet, c.aukEndpoint, "/health", nil, &out); err != nil {
 		return Health{}, err
 	}
 	return out, nil
@@ -731,10 +1024,17 @@ type Output struct {
 	// is not inline.
 	Delivery        string  `json:"delivery,omitempty"`
 	AudioURL        string  `json:"audio_url,omitempty"`
+	Bucket          string  `json:"bucket,omitempty"`
+	Key             string  `json:"key,omitempty"`
 	SizeBytes       int64   `json:"size_bytes,omitempty"`
 	Mode            string  `json:"mode,omitempty"`
 	CfgScale        float64 `json:"cfg_scale,omitempty"`
 	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	ModelVariant    string  `json:"model_variant,omitempty"`
+	NFE             int     `json:"nfe,omitempty"`
+	TaskExecuted    string  `json:"task_executed,omitempty"`
+	URLExpiresIn    int64   `json:"url_expires_in,omitempty"`
+	URLExpiresAt    string  `json:"url_expires_at,omitempty"`
 
 	// Error carries a worker failure envelope that arrived nested inside
 	// `output` rather than at the top level of the status response. RunPod's
@@ -896,6 +1196,74 @@ func decodeBreezeError(raw json.RawMessage) *BreezeWorkerError {
 	return &env
 }
 
+
+// AuKWorkerError is the structured envelope serialized into RunPod's string
+// error field by sruckh/tencent-auk.
+type AuKWorkerError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Field   string `json:"field,omitempty"`
+}
+
+func (e *AuKWorkerError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "AuK execution failed"
+	}
+	if e.Field != "" {
+		message += " (" + e.Field + ")"
+	}
+	if e.Code != "" {
+		return e.Code + ": " + message
+	}
+	return message
+}
+
+// AuKError decodes both RunPod's required JSON string and a defensive nested
+// output.error envelope.
+func (sr StatusResult) AuKError() *AuKWorkerError {
+	if sr.Error != nil {
+		if env := decodeAuKErrorValue(sr.Error); env != nil {
+			return env
+		}
+	}
+	if len(sr.Output.Error) > 0 {
+		var value any
+		if err := json.Unmarshal(sr.Output.Error, &value); err == nil {
+			return decodeAuKErrorValue(value)
+		}
+	}
+	return nil
+}
+
+func decodeAuKErrorValue(value any) *AuKWorkerError {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		raw = []byte(encoded)
+	}
+	var wrapped struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Error) > 0 {
+		raw = wrapped.Error
+		if err := json.Unmarshal(raw, &encoded); err == nil {
+			raw = []byte(encoded)
+		}
+	}
+	var env AuKWorkerError
+	if err := json.Unmarshal(raw, &env); err != nil || (env.Code == "" && env.Message == "") {
+		return nil
+	}
+	return &env
+}
+
 // Status queries GET /status/{id} for the progress or completion of an async job.
 func (c *Client) Status(ctx context.Context, id string) (StatusResult, error) {
 	if id == "" {
@@ -937,6 +1305,22 @@ func (c *Client) StatusBreeze(ctx context.Context, id string) (StatusResult, err
 	}
 	var out StatusResult
 	if err := c.do(ctx, http.MethodGet, c.breezeEndpoint, "/status/"+id, nil, &out); err != nil {
+		return StatusResult{}, err
+	}
+	return out, nil
+}
+
+
+// StatusAuK reads one job from the dedicated Tencent AuK endpoint.
+func (c *Client) StatusAuK(ctx context.Context, id string) (StatusResult, error) {
+	if id == "" {
+		return StatusResult{}, errors.New("runpod: empty job id")
+	}
+	if c.aukEndpoint == "" {
+		return StatusResult{}, ErrNoAuKEndpoint
+	}
+	var out StatusResult
+	if err := c.do(ctx, http.MethodGet, c.aukEndpoint, "/status/"+id, nil, &out); err != nil {
 		return StatusResult{}, err
 	}
 	return out, nil

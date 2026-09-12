@@ -43,7 +43,10 @@ reference, rendered in itself.
   alignment (`WhisperAligner`, `response_format=verbose_json`, `token_timestamps=true`)
   use `POST /inference`. The poller invokes output alignment on completed Higgs and Breeze PCM
   WAV audio before `MarkReady` (`source: whisper_cpp`) — for Breeze it is the
-  only timing source, as its worker emits no `word_timings` at all; Moss renders bypass local
+  only timing source, as its worker emits no `word_timings` at all; AuK TTS tasks
+  (`instruct_tts`, `zero_shot_tts`) align the same way, while AuK
+  editing/enhancement/separation skips alignment (word timing is meaningless
+  there); Moss renders bypass local
   alignment and preserve native timings. Alignment failures log a privacy-safe
   warning and save empty alignment (`""`) so the player uses proportional fallback.
   Stopping only the sidecar is the rollback fallback: MOSS jobs and the app UI stay
@@ -67,10 +70,27 @@ reference, rendered in itself.
   endpoint renders its built-in voice) — and reconciles away any stale stock
   rows. MOSS-TTS v1.5 remains the default engine; the studio also exposes
   `bosonai/higgs-tts-3-4b`, whose voice identity comes from cloned references,
-  and `BreezeBlue/Breeze-TTS-2`, which adds three modes: **clone** (reference +
-  stored transcript), **design** (a written instruction alone — the one render
-  that posts no `voice_id` and stores it SQL NULL), and **direction** (clone +
-  steering instruction).
+  `BreezeBlue/Breeze-TTS-2`, which adds three modes: **clone** (reference +
+  stored transcript), **design** (a written instruction alone — one of the
+  renders that posts no `voice_id` and stores it SQL NULL), and **direction**
+  (clone + steering instruction), and **`tencent/AuK`** (worker
+  `sruckh/tencent-auk`, endpoint `AUK_RUNPOD_ENDPOINT`, same `RUNPOD_API_KEY`)
+  — not a text-plus-voice TTS form: one **instruction** drives eight tasks
+  (`auto`, `zero_shot_tts`, `instruct_tts`, `content_edit`, `acoustic_edit`,
+  `paralinguistic_edit`, `enhancement`, `separation`) under the documented
+  task/audio matrix, with `flash` (NFE accepts 1..8 but executes 4, CFG forced
+  0) and `base` (NFE 16..64, CFG 1..5) variants, `gen_seconds` 0.5..300 and
+  `auto|s3|base64` delivery. AuK jobs enqueue with `voice_id` SQL NULL; their
+  source/prompt audio is an HTTP(S) URL in `params_json` or a private upload
+  under `TIMBRE_AUDIO_DIR/inputs/user_<id>/` (15 MB decoded cap, multipart
+  `audio_file`/`prompt_audio_file` or urlencoded `audio`/`prompt_audio`
+  base64) — the worker base64-encodes the private file exactly once at
+  submit and deletes it after `MarkSubmitted` (kept while submission retries
+  transiently; removed on job delete and user deletion via `Job.InputPaths`).
+  The poller accepts inline `audio_base64` or presigned `audio_url` (bounded
+  64 MiB download) and runs Whisper alignment only on AuK TTS tasks —
+  editing/enhancement/separation takes store empty alignment for
+  proportional playback fallback.
   The UI is `GET /voices` (HTML page, or JSON when `Accept: application/json`);
   `POST /voices/upload` accepts an authenticated multipart file (validated by
   extension + 10 MB cap), stores the bytes, inserts a `kind='cloned'` row,
@@ -217,9 +237,14 @@ reference, rendered in itself.
   **`jobs.model` records what rendered a take** (`jobs.DefaultModel` at enqueue,
   backfilled by `db.Migrate` for older rows). Queue rows and the player both read
   their model badges from that column — never from a presentation-only literal.
-  Browser/API selection is limited to `jobs.DefaultModel`, `jobs.HiggsModel` and
-  `jobs.BreezeModel`;
-  the store remains able to preserve explicit historical attribution. The frontend is templ + HTMX v4 (ESM from
+  Browser/API selection is limited to `jobs.DefaultModel`, `jobs.HiggsModel`,
+  `jobs.BreezeModel` and `jobs.AuKModel`;
+  the store remains able to preserve explicit historical attribution. The compose card posts
+  `multipart/form-data` (AuK source/prompt uploads); non-multipart callers hit the same
+  validation minus file fields. AuK-only fields (`task`, `instruction`, `audio*`,
+  `prompt_*`, `gen_*`, `model_variant`, `nfe`, `cfg_scale`, `response_delivery`) are read
+  **only when the engine is AuK**, and AuK jobs must not leak engine-specific params into
+  MOSS/Higgs/Breeze payloads (nor they into AuK). The frontend is templ + HTMX v4 (ESM from
   jsdelivr) + Alpine 3 + Tailwind v4; component CSS (badges, buttons, range,
   toggle, spoken line, alerts, empty states) lives in
   `internal/web/input.css`, copied to fidelity from `index.html`.

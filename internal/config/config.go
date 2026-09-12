@@ -45,6 +45,12 @@ const HiggsRunPodEndpointEnv = "HIGGS_RUNPOD_ENDPOINT"
 // never routed through either. Authenticates with the same RUNPOD_API_KEY.
 const BreezeRunPodEndpointEnv = "BREEZE_RUNPOD_ENDPOINT"
 
+// AuKRunPodEndpointEnv names the variable holding the Tencent AuK
+// (tencent/AuK) serverless endpoint. AuK has a distinct job contract and is
+// deployed separately from the three speech-only engines, but authenticates
+// with the same RUNPOD_API_KEY.
+const AuKRunPodEndpointEnv = "AUK_RUNPOD_ENDPOINT"
+
 // Config is the fully resolved runtime configuration.
 type Config struct {
 	// Addr is the listen address. No host port is published; NGINX Proxy
@@ -73,10 +79,14 @@ type Config struct {
 	// HiggsRunPodEndpoint — never a reinterpretation of either.
 	BreezeRunPodEndpoint string
 
+	// AuKRunPodEndpoint is the base URL for the Tencent AuK RunPod Serverless
+	// endpoint. It is independent because AuK supports generation, editing,
+	// enhancement and separation through a different payload contract.
+	AuKRunPodEndpoint string
+
 	// RunPodAPIKey is the bearer token. Injected by Infisical at runtime.
-	// Shared across RunPodEndpoint, HiggsRunPodEndpoint and
-	// BreezeRunPodEndpoint — reusing one credential for every endpoint is an
-	// approved project decision.
+	// Shared across every configured RunPod endpoint — reusing one credential
+	// is an approved project decision.
 	RunPodAPIKey string
 
 	// AdminUsername and AdminPassword seed the first user on startup when the
@@ -103,6 +113,7 @@ func Load() (Config, error) {
 		RunPodEndpoint:       strings.TrimRight(os.Getenv(RunPodEndpointEnv), "/"),
 		HiggsRunPodEndpoint:  strings.TrimRight(os.Getenv(HiggsRunPodEndpointEnv), "/"),
 		BreezeRunPodEndpoint: strings.TrimRight(os.Getenv(BreezeRunPodEndpointEnv), "/"),
+		AuKRunPodEndpoint:    strings.TrimRight(os.Getenv(AuKRunPodEndpointEnv), "/"),
 		RunPodAPIKey:         os.Getenv("RUNPOD_API_KEY"),
 		AdminUsername:        os.Getenv("ADMIN_USERNAME"),
 		AdminPassword:        os.Getenv("ADMIN_PASSWORD"),
