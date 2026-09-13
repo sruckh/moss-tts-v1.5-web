@@ -80,12 +80,17 @@ reference, rendered in itself.
   `paralinguistic_edit`, `enhancement`, `separation`) under the documented
   task/audio matrix, with `flash` (NFE accepts 1..8 but executes 4, CFG forced
   0) and `base` (NFE 16..64, CFG 1..5) variants, `gen_seconds` 0.5..300 and
-  `auto|s3|base64` delivery. AuK jobs enqueue with `voice_id` SQL NULL; their
-  source/prompt audio is an HTTP(S) URL in `params_json` or a private upload
-  under `TIMBRE_AUDIO_DIR/inputs/user_<id>/` (15 MB decoded cap, multipart
-  `audio_file`/`prompt_audio_file` or urlencoded `audio`/`prompt_audio`
-  base64) — the worker base64-encodes the private file exactly once at
-  submit and deletes it after `MarkSubmitted` (kept while submission retries
+  `auto|s3|base64` delivery. AuK zero-TTS and Auto-with-clone jobs retain the
+  selected cloned card's `voice_id`; Timbre authorization-checks that card and
+  copies its stored reference into a private job-owned `prompt_audio_path`.
+  Stock cards have no reference: explicit zero-shot rejects them, while Auto
+  falls back to instruction TTS. Edit/enhance/separation tasks take exactly one
+  source: multipart `audio_file` or the user's selected ready render
+  (`source_job_id`). Render bytes are ownership/status/15 MB checked and copied
+  under `TIMBRE_AUDIO_DIR/inputs/user_<id>/`, so deleting the original take
+  cannot break the queued job. Browser-facing URL/base64 prompt and source
+  fields are rejected. The worker base64-encodes each private file exactly once
+  at submit and deletes it after `MarkSubmitted` (kept while submission retries
   transiently; removed on job delete and user deletion via `Job.InputPaths`).
   The poller accepts inline `audio_base64` or presigned `audio_url` (bounded
   64 MiB download) and runs Whisper alignment only on AuK TTS tasks —
@@ -107,6 +112,32 @@ reference, rendered in itself.
   enqueue responses never wait for Whisper; the background worker owns eager and
   atomic lazy recovery before a Higgs job reaches RunPod. MOSS jobs bypass this
   transcript gate entirely.
+- **The AuK prompt assistant is a synchronous, unpersisted LLM proxy scoped to
+  one fixed system prompt.** `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_ID`
+  are Infisical secrets exactly like `RUNPOD_API_KEY` — no docker-compose.yml
+  entry, injected straight into the app process by `infisical run`.
+  `internal/assistant.Client` calls one OpenAI-compatible
+  `{base_url}/chat/completions` endpoint; `Client.Configured` reports whether
+  all three are set. `POST /jobs/auk-assistant` (session-gated, registered
+  next to the other `/jobs/*` routes) is a plain request/response — a chat
+  completion finishes in seconds, so unlike every RunPod route there is no
+  worker/poller here and it stays well under Cloudflare's ~90s cap. The
+  browser posts the running conversation (`{"messages":[{"role","content"}]}`,
+  ≤40 turns, ≤4000 characters each); the server always prepends the fixed
+  `assistant.SystemPrompt` and never accepts one from the client. A malformed
+  request is `400` regardless of configuration; a well-formed one against an
+  unconfigured assistant is `503`; an upstream failure is a generic `500` (the
+  key never reaches the error body). Nothing about the conversation is written
+  to the database — it lives only in the compose form's Alpine state
+  (`aukAssistant()` in `studioHelpers`, `internal/web/studio.templ`) for the
+  life of the page. The assistant's canonical
+  `TASK:`/`INSTRUCTION:`/`REQUIRED AUDIO INPUT:`/`NOTES:` reply never
+  overwrites the instruction field on its own — the panel renders an explicit
+  **"Insert into instruction"** button (parsed client-side from the quoted
+  `INSTRUCTION:` line) that dispatches `timbre-assistant-apply`, which the
+  compose form's top-level `x-data` scope listens for, the same cross-scope
+  pattern `timbre-source-selected` uses (`internal/web/jobs.templ`).
+
 - **No request blocks longer than ~90s** (Cloudflare's cap). The browser talks
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sruckh/timbre/internal/assistant"
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
@@ -42,7 +43,8 @@ func run(log *slog.Logger) error {
 		"addr", cfg.Addr,
 		"db", cfg.DBPath,
 		"runpod_endpoint", cfg.RunPodEndpoint,
-		"runpod_key_present", cfg.HasRunPodKey())
+		"runpod_key_present", cfg.HasRunPodKey(),
+		"llm_configured", cfg.LLMConfigured())
 
 	if err := os.MkdirAll(cfg.AudioDir, 0o750); err != nil {
 		return err
@@ -85,6 +87,10 @@ func run(log *slog.Logger) error {
 		runpod.WithHiggsEndpoint(cfg.HiggsRunPodEndpoint),
 		runpod.WithBreezeEndpoint(cfg.BreezeRunPodEndpoint),
 		runpod.WithAuKEndpoint(cfg.AuKRunPodEndpoint))
+	assistantClient := assistant.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModelID)
+	if !assistantClient.Configured() {
+		log.Warn("LLM_BASE_URL, LLM_API_KEY or LLM_MODEL_ID missing; the AuK prompt assistant will report itself unavailable")
+	}
 
 	// The submission worker is the only caller of RunPod. It starts even when
 	// the endpoint or key is missing: queued jobs then fail with a recorded
@@ -109,7 +115,7 @@ func run(log *slog.Logger) error {
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(cfg, handle, authManager, voiceStore, jobStore, runpodClient),
+		Handler:           server.New(cfg, handle, authManager, voiceStore, jobStore, runpodClient, assistantClient),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Generous but finite: every browser-facing request is sub-second,
 		// and uploads of reference audio are the only large bodies.

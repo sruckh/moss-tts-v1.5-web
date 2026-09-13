@@ -135,8 +135,8 @@ func (h *harness) worker(client Submitter, maxInFlight int, opts ...Option) *Wor
 // fakeSubmitter counts calls and records the payloads it was handed. The call
 // count is what proves a job is never submitted twice.
 type fakeSubmitter struct {
-	mu          sync.Mutex
-	calls       int
+	mu           sync.Mutex
+	calls        int
 	inputs       []runpod.Input
 	higgsInputs  []runpod.HiggsInput
 	breezeInputs []runpod.BreezeInput
@@ -165,7 +165,6 @@ func (f *fakeSubmitter) SubmitBreeze(_ context.Context, in runpod.BreezeInput) (
 	}
 	return runpod.Submission{ID: id, Status: status}, nil
 }
-
 
 func (f *fakeSubmitter) SubmitAuK(_ context.Context, in runpod.AuKInput) (runpod.Submission, error) {
 	f.mu.Lock()
@@ -1237,7 +1236,6 @@ func TestHTTPWhisperClientRejectsInvalidWordTimings(t *testing.T) {
 	}
 }
 
-
 func TestSubmitRoutesAuKJobAndRemovesPrivateInput(t *testing.T) {
 	h := newHarness(t)
 	inputPath := filepath.Join(t.TempDir(), "source.wav")
@@ -1265,6 +1263,33 @@ func TestSubmitRoutesAuKJobAndRemovesPrivateInput(t *testing.T) {
 	}
 	if _, err := os.Stat(inputPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("submitted input was not removed: %v", err)
+	}
+}
+
+func TestAuKZeroShotBypassesVoiceTranscriptionGate(t *testing.T) {
+	h := newHarness(t)
+	promptPath := filepath.Join(t.TempDir(), "prompt.wav")
+	if err := os.WriteFile(promptPath, []byte("RIFF-PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := h.enqueueFull(t, h.cloneID, "say hello", jobs.AuKModel, map[string]any{
+		"task": runpod.AuKTaskZeroShotTTS, "prompt_audio_path": promptPath,
+		"model_variant": runpod.AuKVariantFlash, "nfe": 4,
+		"cfg_scale": 0, "response_delivery": runpod.AuKDeliveryBase64,
+	})
+	client := &fakeSubmitter{id: "auk-zero-shot"}
+	whisper := &fakeWhisper{err: errors.New("must not be called")}
+	h.worker(client, 2, WithWhisperClient(whisper)).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("job = %+v", got)
+	}
+	if whisper.callCount() != 0 {
+		t.Errorf("whisper calls = %d, want 0 for AuK's optional prompt transcript", whisper.callCount())
+	}
+	if len(client.aukInputs) != 1 || client.aukInputs[0].PromptAudio != base64.StdEncoding.EncodeToString([]byte("RIFF-PROMPT")) {
+		t.Fatalf("AuK inputs = %+v", client.aukInputs)
 	}
 }
 

@@ -2,6 +2,7 @@ package web
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/sruckh/timbre/internal/jobs"
 	"github.com/sruckh/timbre/internal/voices"
@@ -190,6 +191,7 @@ templ queueRow(j jobs.Job, durations map[int64]string, selected bool) {
 		aria-selected={ ariaSelected(selected) }
 		tabindex="0"
 		data-take={ strconv.FormatInt(j.ID, 10) }
+		data-source-ready={ strconv.FormatBool(j.Status == jobs.StatusReady && strings.TrimSpace(j.AudioPath) != "") }
 		hx-get={ "/jobs/" + strconv.FormatInt(j.ID, 10) + "/player" }
 		hx-target="#playback-body"
 		hx-swap="innerHTML show:none"
@@ -272,6 +274,7 @@ templ iconTrash() {
 // the live queue table, and the player the selected row lands in.
 templ QueuePage(items []jobs.Job, available []voices.Voice, durations map[int64]string, selected int64) {
 	{{ take := resolveSelected(items, selected) }}
+	{{ sourceTake, _ := takeByID(items, take) }}
 	@AppShell("Queue · Timbre", "queue") {
 		<header class="pb-8">
 			<p class="eyebrow">Render queue</p>
@@ -281,7 +284,7 @@ templ QueuePage(items []jobs.Job, available []voices.Voice, durations map[int64]
 				here waits on the render, so a long job never ties up the page.
 			</p>
 		</header>
-		@Compose(available, firstVoiceID(available))
+		@Compose(available, firstVoiceID(available), sourceTake)
 		<section class="mt-8">
 			<div class="scrollable-list max-h-[500px]">
 				@Queue(items, 0, durations, take)

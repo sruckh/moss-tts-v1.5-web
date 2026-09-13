@@ -790,7 +790,6 @@ func (w *Worker) buildBreezeInput(ctx context.Context, job jobs.Job) (runpod.Bre
 	}
 }
 
-
 func (w *Worker) buildAuKInput(job jobs.Job) (runpod.AuKInput, error) {
 	params := job.Params()
 	audio, err := loadAuKAudio(params, "audio", "audio_path")
@@ -859,6 +858,12 @@ func loadAuKAudio(params map[string]any, valueKey, pathKey string) (string, erro
 func (w *Worker) ensureTranscript(ctx context.Context, job jobs.Job) error {
 	if job.Model == "" || job.Model == jobs.DefaultModel {
 		return nil // MOSS bypass
+	}
+	if job.IsAuK() {
+		// AuK prompt audio is copied into the job at enqueue time and prompt_text
+		// is optional. Retaining voice_id attributes the take to its source card;
+		// it must not turn AuK into a Higgs/Breeze transcription dependency.
+		return nil
 	}
 	// Breeze design mode renders from an instruction alone. It has no reference
 	// voice to transcribe, so it leaves the gate the same way MOSS does — a new

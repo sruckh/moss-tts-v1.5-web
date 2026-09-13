@@ -1,13 +1,12 @@
 package server
 
 import (
-	"encoding/base64"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -133,8 +132,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	var params map[string]any
 	var inputPaths []string
+	var voiceID int64
 	if model == jobs.AuKModel {
-		params, inputPaths, err = s.parseAuKJobParams(r, userID)
+		params, inputPaths, voiceID, err = s.parseAuKJobParams(r, userID)
 	} else {
 		params, err = parseJobParams(r, model)
 	}
@@ -165,7 +165,6 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		designRender = mode == runpod.BreezeModeDesign
 	}
 
-	var voiceID int64
 	needsVoice := model != jobs.AuKModel && !designRender
 	if needsVoice {
 		voiceID, err = strconv.ParseInt(strings.TrimSpace(r.PostFormValue("voice_id")), 10, 64)
@@ -237,7 +236,6 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	s.renderQueue(w, r, items, id)
 }
 
-
 func parseJobForm(w http.ResponseWriter, r *http.Request) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuKRequestBytes)
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
@@ -246,48 +244,124 @@ func parseJobForm(w http.ResponseWriter, r *http.Request) error {
 	return r.ParseForm()
 }
 
-func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]any, []string, error) {
+func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]any, []string, int64, error) {
 	params := map[string]any{}
 	paths := make([]string, 0, 2)
-	cleanup := func(err error) (map[string]any, []string, error) {
+	cleanup := func(err error) (map[string]any, []string, int64, error) {
 		removePaths(paths)
-		return nil, nil, err
+		return nil, nil, 0, err
+	}
+
+	if strings.TrimSpace(r.PostFormValue("prompt_audio")) != "" {
+		return cleanup(errors.New("prompt audio comes from the selected voice card"))
+	}
+	if file, _, err := r.FormFile("prompt_audio_file"); err == nil {
+		_ = file.Close()
+		return cleanup(errors.New("prompt audio comes from the selected voice card"))
+	} else if !errors.Is(err, http.ErrMissingFile) && !errors.Is(err, http.ErrNotMultipart) {
+		return cleanup(fmt.Errorf("read prompt_audio_file: %w", err))
 	}
 
 	audio, audioPath, err := s.parseAuKAudio(r, userID, "audio", "audio_file")
 	if err != nil {
 		return cleanup(err)
 	}
-	if audio != "" {
-		params["audio"] = audio
-	}
 	if audioPath != "" {
-		params["audio_path"] = audioPath
 		paths = append(paths, audioPath)
 	}
 
-	promptAudio, promptPath, err := s.parseAuKAudio(r, userID, "prompt_audio", "prompt_audio_file")
-	if err != nil {
-		return cleanup(err)
+	var sourceJobID int64
+	if raw := strings.TrimSpace(r.PostFormValue("source_job_id")); raw != "" {
+		sourceJobID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || sourceJobID <= 0 {
+			return cleanup(errors.New("select a valid ready render"))
+		}
+		if audioPath != "" {
+			return cleanup(errors.New("choose either an audio upload or the selected render, not both"))
+		}
+		audioPath, err = s.copyAuKRender(r.Context(), userID, sourceJobID)
+		if err != nil {
+			return cleanup(err)
+		}
+		paths = append(paths, audioPath)
+		params["source_job_id"] = sourceJobID
 	}
-	if promptAudio != "" {
-		params["prompt_audio"] = promptAudio
-	}
-	if promptPath != "" {
-		params["prompt_audio_path"] = promptPath
-		paths = append(paths, promptPath)
+	if audioPath != "" {
+		params["audio_path"] = audioPath
 	}
 
 	in := runpod.AuKInput{
 		Task:             strings.TrimSpace(r.PostFormValue("task")),
 		Instruction:      strings.TrimSpace(r.PostFormValue("instruction")),
 		Audio:            auKValidationAudio(audio, audioPath),
-		PromptAudio:      auKValidationAudio(promptAudio, promptPath),
 		PromptText:       strings.TrimSpace(r.PostFormValue("prompt_text")),
 		GenText:          strings.TrimSpace(r.PostFormValue("gen_text")),
 		ModelVariant:     strings.TrimSpace(r.PostFormValue("model_variant")),
 		ResponseDelivery: strings.TrimSpace(r.PostFormValue("response_delivery")),
 	}
+
+	var voiceID int64
+	task := in.Task
+	if task == "" {
+		task = runpod.AuKTaskAuto
+	}
+	if task == runpod.AuKTaskAuto || task == runpod.AuKTaskZeroShotTTS {
+		voiceID, err = strconv.ParseInt(strings.TrimSpace(r.PostFormValue("voice_id")), 10, 64)
+		if err != nil || voiceID <= 0 {
+			if task == runpod.AuKTaskZeroShotTTS {
+				return cleanup(errors.New("zero-shot TTS requires a selected cloned voice"))
+			}
+			voiceID = 0
+		} else {
+			voice, getErr := s.voices.Get(r.Context(), voiceID)
+			if getErr != nil {
+				if errors.Is(getErr, voices.ErrNotFound) {
+					return cleanup(errors.New("that voice no longer exists"))
+				}
+				return cleanup(getErr)
+			}
+			accessible, accessErr := s.voices.IsAccessibleToUser(r.Context(), voice.ID, userID)
+			if accessErr != nil {
+				return cleanup(accessErr)
+			}
+			if !accessible {
+				return cleanup(errors.New("you do not have access to that voice"))
+			}
+			if voice.Kind != voices.KindCloned {
+				if task == runpod.AuKTaskZeroShotTTS {
+					return cleanup(errors.New("zero-shot TTS requires a selected cloned voice with reference audio"))
+				}
+				voiceID = 0
+			} else {
+				data, _, refErr := s.voices.Reference(r.Context(), voice.ID)
+				if refErr != nil {
+					if errors.Is(refErr, voices.ErrNoReference) && task == runpod.AuKTaskAuto {
+						voiceID = 0
+					} else if errors.Is(refErr, voices.ErrNoReference) {
+						return cleanup(errors.New("zero-shot TTS requires a selected cloned voice with reference audio"))
+					} else {
+						return cleanup(refErr)
+					}
+				} else {
+					promptPath, saveErr := s.saveAuKInput(userID, "prompt_audio", data)
+					if saveErr != nil {
+						return cleanup(saveErr)
+					}
+					paths = append(paths, promptPath)
+					params["prompt_audio_path"] = promptPath
+					in.PromptAudio = auKValidationAudio("", promptPath)
+					if in.PromptText == "" && voice.ReferenceTranscript.Valid {
+						in.PromptText = strings.TrimSpace(voice.ReferenceTranscript.V)
+					}
+				}
+			}
+		}
+	}
+
+	if task == runpod.AuKTaskAuto && in.PromptAudio == "" {
+		in.PromptText = ""
+	}
+
 	if raw := strings.TrimSpace(r.PostFormValue("gen_seconds")); raw != "" {
 		in.GenSeconds, err = strconv.ParseFloat(raw, 64)
 		if err != nil || in.GenSeconds < 0.5 || in.GenSeconds > 300 {
@@ -335,64 +409,74 @@ func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]an
 	if in.Seed != nil {
 		params["seed"] = *in.Seed
 	}
-	return params, paths, nil
+	return params, paths, voiceID, nil
 }
 
 func (s *Server) parseAuKAudio(r *http.Request, userID int64, valueField, fileField string) (string, string, error) {
-	direct := strings.TrimSpace(r.PostFormValue(valueField))
+	if strings.TrimSpace(r.PostFormValue(valueField)) != "" {
+		return "", "", fmt.Errorf("%s must come from an upload or selected ready render", valueField)
+	}
 	file, _, fileErr := r.FormFile(fileField)
-	// A urlencoded request (API callers, non-multipart forms) has no file
-	// part at all: ErrNotMultipart means "nothing uploaded here", exactly
-	// like ErrMissingFile does inside a multipart body.
-	hasFile := fileErr == nil
-	if fileErr != nil && !errors.Is(fileErr, http.ErrMissingFile) && !errors.Is(fileErr, http.ErrNotMultipart) {
-		return "", "", fmt.Errorf("read %s: %w", fileField, fileErr)
-	}
-	if direct != "" && hasFile {
-		_ = file.Close()
-		return "", "", fmt.Errorf("provide %s as either an upload or URL/base64, not both", valueField)
-	}
-	if hasFile {
-		data, err := io.ReadAll(io.LimitReader(file, runpod.AuKMaxAudioBytes+1))
-		closeErr := file.Close()
-		if err != nil {
-			return "", "", fmt.Errorf("read %s: %w", fileField, err)
-		}
-		if closeErr != nil {
-			return "", "", fmt.Errorf("close %s: %w", fileField, closeErr)
-		}
-		if len(data) == 0 {
-			return "", "", fmt.Errorf("%s is empty", fileField)
-		}
-		if len(data) > runpod.AuKMaxAudioBytes {
-			return "", "", fmt.Errorf("%s exceeds the 15 MB decoded limit", fileField)
-		}
-		path, err := s.saveAuKInput(userID, valueField, data)
-		return "", path, err
-	}
-	if direct == "" {
+	// A urlencoded request has no file part at all: ErrNotMultipart means
+	// "nothing uploaded here", exactly like ErrMissingFile in multipart data.
+	if errors.Is(fileErr, http.ErrMissingFile) || errors.Is(fileErr, http.ErrNotMultipart) {
 		return "", "", nil
 	}
-	if parsed, err := url.ParseRequestURI(direct); err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
-		return direct, "", nil
+	if fileErr != nil {
+		return "", "", fmt.Errorf("read %s: %w", fileField, fileErr)
 	}
-	encoded := direct
-	if strings.HasPrefix(encoded, "data:") {
-		comma := strings.IndexByte(encoded, ',')
-		if comma < 0 || !strings.Contains(encoded[:comma], ";base64") {
-			return "", "", fmt.Errorf("%s must be base64, a base64 data URL, or an HTTP(S) URL", valueField)
-		}
-		encoded = encoded[comma+1:]
+	data, err := io.ReadAll(io.LimitReader(file, runpod.AuKMaxAudioBytes+1))
+	closeErr := file.Close()
+	if err != nil {
+		return "", "", fmt.Errorf("read %s: %w", fileField, err)
 	}
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(data) == 0 {
-		return "", "", fmt.Errorf("%s is not valid base64 or an HTTP(S) URL", valueField)
+	if closeErr != nil {
+		return "", "", fmt.Errorf("close %s: %w", fileField, closeErr)
+	}
+	if len(data) == 0 {
+		return "", "", fmt.Errorf("%s is empty", fileField)
 	}
 	if len(data) > runpod.AuKMaxAudioBytes {
-		return "", "", fmt.Errorf("%s exceeds the 15 MB decoded limit", valueField)
+		return "", "", fmt.Errorf("%s exceeds the 15 MB decoded limit", fileField)
 	}
 	path, err := s.saveAuKInput(userID, valueField, data)
 	return "", path, err
+}
+
+func (s *Server) copyAuKRender(ctx context.Context, userID, sourceJobID int64) (string, error) {
+	job, err := s.jobs.Get(ctx, sourceJobID, userID)
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			return "", errors.New("selected render was not found")
+		}
+		return "", fmt.Errorf("load selected render: %w", err)
+	}
+	if job.Status != jobs.StatusReady || strings.TrimSpace(job.AudioPath) == "" {
+		return "", errors.New("selected render is not ready")
+	}
+
+	file, err := os.Open(job.AudioPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("selected render audio is missing")
+	}
+	if err != nil {
+		return "", fmt.Errorf("open selected render audio: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, runpod.AuKMaxAudioBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read selected render audio: %w", readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close selected render audio: %w", closeErr)
+	}
+	if len(data) == 0 {
+		return "", errors.New("selected render audio is empty")
+	}
+	if len(data) > runpod.AuKMaxAudioBytes {
+		return "", errors.New("selected render exceeds the 15 MB decoded limit")
+	}
+	return s.saveAuKInput(userID, "audio", data)
 }
 
 func (s *Server) saveAuKInput(userID int64, field string, data []byte) (string, error) {

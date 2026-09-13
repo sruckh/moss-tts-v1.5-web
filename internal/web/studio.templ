@@ -15,6 +15,7 @@ import (
 // line — the whole product on one page, per DESIGN.md and index.html.
 templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string, selected int64) {
 	{{ take := resolveSelected(items, selected) }}
+	{{ sourceTake, _ := takeByID(items, take) }}
 	@AppShell("Studio · Timbre", "studio") {
 		<header class="pb-12">
 			@spectrum()
@@ -26,7 +27,7 @@ templ Studio(items []jobs.Job, vs []voices.Voice, durations map[int64]string, se
 				polls itself — nothing on this page waits on the GPU.
 			</p>
 		</header>
-		@Compose(vs, firstVoiceID(vs))
+		@Compose(vs, firstVoiceID(vs), sourceTake)
 		<section class="mt-12 border-t border-line pt-12" id="voices">
 			<p class="eyebrow">Voice library</p>
 			<h2 class="font-display text-[26px] font-semibold tracking-[-0.02em]">A voice is a card</h2>
@@ -87,17 +88,30 @@ func takeByID(items []jobs.Job, id int64) (jobs.Job, bool) {
 	return jobs.Job{}, false
 }
 
+// sourceTakeInit seeds the compose form from the ready take already selected in
+// the player. Later queue-row selections update the same Alpine state by event.
+func sourceTakeInit(j jobs.Job) string {
+	if j.Status != jobs.StatusReady || j.ID <= 0 || strings.TrimSpace(j.AudioPath) == "" {
+		return ""
+	}
+	id := strconv.FormatInt(j.ID, 10)
+	return "sourceTakeID = '" + id + "'; sourceTakeLabel = 'Take " + id + "'; sourceTakeReady = true"
+}
+
 // Compose is the render form. AuK gets a dedicated task workspace because its
 // generation, editing, enhancement and separation contract is not a conventional
 // text-plus-voice TTS form.
-templ Compose(available []voices.Voice, selectedID int64) {
+templ Compose(available []voices.Voice, selectedID int64, sourceTake jobs.Job) {
 	<form
 		hx-post="/jobs"
 		hx-target="#queue"
 		hx-swap="outerHTML"
 		enctype="multipart/form-data"
 		class="flex flex-col gap-6 rounded-container border border-line bg-surface-1 p-6"
-		x-data="{ script: '', aukInstruction: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, engine: '', mode: 'clone', aukTask: 'instruct_tts', aukVariant: 'flash', nfe: '4', aukCfg: '0', get isBreeze() { return this.engine === $refs.breezeModel.value }, get isAuK() { return this.engine === $refs.aukModel.value }, get needsInstruct() { return this.isBreeze &amp;&amp; (this.mode === 'design' || this.mode === 'direction') }, get needsVoice() { return !this.isAuK &amp;&amp; (!this.isBreeze || this.mode !== 'design') }, get aukNeedsSource() { return ['content_edit','acoustic_edit','paralinguistic_edit','enhancement','separation'].includes(this.aukTask) }, get aukAllowsPrompt() { return this.aukTask === 'zero_shot_tts' || this.aukTask === 'auto' }, setAuKDefaults() { if (this.aukVariant === 'base') { this.nfe = '32'; this.aukCfg = '2'; } else { this.nfe = '4'; this.aukCfg = '0'; } }, tag(t) { this.script = this.script + t }, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
+		x-data="{ script: '', aukInstruction: '', pace: '1', pitch: '0', expr: '0.65', limit: 5000, engine: '', mode: 'clone', aukTask: 'instruct_tts', aukVariant: 'flash', nfe: '4', aukCfg: '0', audioSource: 'upload', sourceTakeID: '', sourceTakeLabel: 'No ready render selected', sourceTakeReady: false, get isBreeze() { return this.engine === $refs.breezeModel.value }, get isAuK() { return this.engine === $refs.aukModel.value }, get needsInstruct() { return this.isBreeze &amp;&amp; (this.mode === 'design' || this.mode === 'direction') }, get aukNeedsSource() { return ['content_edit','acoustic_edit','paralinguistic_edit','enhancement','separation'].includes(this.aukTask) }, get aukAllowsPrompt() { return this.aukTask === 'zero_shot_tts' || this.aukTask === 'auto' }, get needsVoice() { return (!this.isAuK &amp;&amp; (!this.isBreeze || this.mode !== 'design')) || (this.isAuK &amp;&amp; this.aukAllowsPrompt) }, get aukSourceMissing() { return this.isAuK &amp;&amp; this.aukNeedsSource &amp;&amp; this.audioSource === 'render' &amp;&amp; !this.sourceTakeReady }, setAuKDefaults() { if (this.aukVariant === 'base') { this.nfe = '32'; this.aukCfg = '2'; } else { this.nfe = '4'; this.aukCfg = '0'; } }, tag(t) { this.script = this.script + t }, get chars() { return [...this.script].length }, get over() { return this.chars > this.limit }, get est() { var s = this.chars / (15 * (parseFloat(this.pace) || 1)); var m = Math.floor(s / 60); return m + ':' + String(Math.round(s % 60)).padStart(2, '0') } }"
+		x-init={ sourceTakeInit(sourceTake) }
+		x-on:timbre-source-selected.window="sourceTakeID = String($event.detail.id); sourceTakeLabel = $event.detail.label; sourceTakeReady = Boolean($event.detail.ready); if (!sourceTakeReady &amp;&amp; audioSource === 'render') audioSource = 'upload'"
+		x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; if ($event.detail.task) { aukTask = $event.detail.task }"
 	>
 		<input type="hidden" id="voice_id" name="voice_id" value={ strconv.FormatInt(selectedID, 10) } x-bind:disabled="!needsVoice"/>
 		<div class="grid gap-6 sm:grid-cols-2">
@@ -122,7 +136,6 @@ templ Compose(available []voices.Voice, selectedID int64) {
 				<p class="help" x-text="mode === 'design' ? 'Design needs no reference voice — the description is the voice.' : 'Uses the selected voice and its stored reference transcript.'"></p>
 			</div>
 		</div>
-
 		<div x-show="!isAuK">
 			<label class="field-label" for="script">Script</label>
 			<textarea id="script" name="text" rows="6" required x-bind:disabled="isAuK" x-model="script" x-ref="scriptBox" :style="over ? 'border-color: var(--color-burnt)' : ''" placeholder="Paste the script to render…" class="input script-input"></textarea>
@@ -130,16 +143,39 @@ templ Compose(available []voices.Voice, selectedID int64) {
 				<span x-text="chars.toLocaleString() + ' / ' + limit.toLocaleString() + ' characters'">0 / 5,000 characters</span>
 				<span x-text="'≈ ' + est + ' at current pace'">≈ 0:00 at current pace</span>
 			</div>
-			<div class="meter"><i :style="'width:' + Math.min(100, (chars / limit) * 100) + '%'"/></div>
+			<div class="meter"><i :style="'width:' + Math.min(100, (chars / limit) * 100) + '%'"></i></div>
 			<p class="help help--limit" x-show="over" x-cloak>Past the 5,000-character limit. Split the script into two takes and render them in sequence.</p>
 		</div>
-
 		<section x-show="isAuK" x-cloak class="grid gap-6 rounded-card border border-line bg-surface-2 p-5 sm:grid-cols-2" aria-label="Tencent AuK task controls">
 			<div class="sm:col-span-2">
 				<p class="eyebrow">AuK task</p>
 				<label class="field-label" for="auk_instruction">Instruction</label>
 				<textarea class="input script-input" id="auk_instruction" name="instruction" rows="4" x-model="aukInstruction" x-bind:disabled="!isAuK" x-bind:required="isAuK" placeholder="Describe exactly what AuK should generate, change, enhance or extract."></textarea>
 				<p class="help">AuK has no separate text field. Include the words to speak and the desired voice or edit in this instruction.</p>
+			</div>
+			<div class="sm:col-span-2 rounded-card border border-line bg-surface-1 p-3" x-data="aukAssistant()">
+				<button type="button" class="btn btn--quiet btn--sm" @click="open = !open" :aria-expanded="open.toString()">
+					<span x-text="open ? 'Hide AI prompt assistant' : 'Ask the AI prompt assistant'"></span>
+				</button>
+				<div x-show="open" x-cloak class="mt-3 flex flex-col gap-3">
+					<p class="help">Describes what you want in plain language; the assistant answers with an AuK-aligned instruction. It never overwrites your instruction on its own — use "Insert into instruction" on a reply. It is text-only and never sees your actual audio: for a task needing a reference or source clip, ignore its request for an attachment and instead select the right voice card or source above — Timbre supplies the real audio separately.</p>
+					<div class="flex flex-col gap-2 max-h-[280px] overflow-y-auto" aria-live="polite">
+						<template x-for="(m, i) in messages" :key="i">
+							<div class="rounded-card border border-line p-2" :class="m.role === 'user' ? 'bg-surface-2' : 'bg-surface-1'">
+								<p class="text-[11px] font-mono text-text-faint" x-text="m.role === 'user' ? 'You' : 'Assistant'"></p>
+								<p class="whitespace-pre-wrap text-[13.5px]" x-text="m.content"></p>
+								<button type="button" class="btn btn--quiet btn--sm mt-1" x-show="m.instruction" x-cloak @click="apply(m.instruction, m.task)">Insert into instruction</button>
+								<p class="help" x-show="m.instruction &amp;&amp; !m.task" x-cloak>Also set the matching Mode above — it could not be inferred automatically.</p>
+							</div>
+						</template>
+					</div>
+					<p class="help" x-show="error" x-cloak x-text="error"></p>
+					<textarea class="input" rows="2" x-model="draft" placeholder="e.g. make the narrator sound calmer and a little slower" x-bind:disabled="busy" @keydown.enter.prevent="send()"></textarea>
+					<div class="flex flex-wrap items-center gap-2">
+						<button type="button" class="btn btn--sm" @click="send()" x-bind:disabled="busy || !draft.trim()" x-text="busy ? 'Asking…' : 'Ask assistant'"></button>
+						<button type="button" class="btn btn--quiet btn--sm" @click="clear()" x-show="messages.length" x-cloak>Clear conversation</button>
+					</div>
+				</div>
 			</div>
 			<div>
 				<label class="field-label" for="auk_task">Mode</label>
@@ -153,7 +189,7 @@ templ Compose(available []voices.Voice, selectedID int64) {
 					<option value="enhancement">Enhancement — denoise or dereverb</option>
 					<option value="separation">Separation — isolate a source or speaker</option>
 				</select>
-				<p class="help" x-text="aukNeedsSource ? 'This task requires source audio.' : (aukAllowsPrompt ? 'Prompt audio is optional in Auto and required for zero-shot TTS.' : 'This task takes the instruction alone.')"></p>
+				<p class="help" x-text="aukNeedsSource ? 'Choose an upload or the selected ready render as source audio.' : (aukAllowsPrompt ? 'Uses the selected cloned voice card when a reference is needed.' : 'This task takes the instruction alone.')"></p>
 			</div>
 			<div>
 				<label class="field-label" for="model_variant">Model variant</label>
@@ -163,33 +199,34 @@ templ Compose(available []voices.Voice, selectedID int64) {
 				</select>
 				<p class="help">Flash is the fast default. Base trades more diffusion steps for control.</p>
 			</div>
-
-			<div x-show="aukNeedsSource" x-cloak>
+			<div x-show="aukNeedsSource" x-cloak class="sm:col-span-2">
+				<span class="field-label">Source audio</span>
+				<div class="flex flex-wrap gap-6 pt-1" role="radiogroup" aria-label="AuK source audio">
+					<label class="sw-toggle">
+						<input type="radio" name="audio_source" value="upload" x-model="audioSource" x-bind:disabled="!isAuK || !aukNeedsSource"/>
+						<span class="track"><span class="knob"></span></span><span class="text-[13.5px]">Upload audio</span>
+					</label>
+					<label class="sw-toggle">
+						<input type="radio" name="audio_source" value="render" x-model="audioSource" x-bind:disabled="!isAuK || !aukNeedsSource || !sourceTakeReady"/>
+						<span class="track"><span class="knob"></span></span><span class="text-[13.5px]">Use selected render</span>
+					</label>
+				</div>
+				<p class="help" x-text="sourceTakeReady ? sourceTakeLabel + ' is available from the render queue.' : 'Select a ready take in the render queue to use it here.'"></p>
+			</div>
+			<div x-show="aukNeedsSource &amp;&amp; audioSource === 'upload'" x-cloak class="sm:col-span-2">
 				<label class="field-label" for="audio_file">Source audio upload</label>
-				<input class="input" id="audio_file" name="audio_file" type="file" accept="audio/*" x-bind:disabled="!isAuK || !aukNeedsSource"/>
+				<input class="input" id="audio_file" name="audio_file" type="file" accept="audio/*" x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'upload'" x-bind:required="isAuK &amp;&amp; aukNeedsSource &amp;&amp; audioSource === 'upload'"/>
 				<p class="help">Private, decoded limit 15 MB. Kept only until the queued job is submitted.</p>
 			</div>
-			<div x-show="aukNeedsSource" x-cloak>
-				<label class="field-label" for="audio">Source URL or base64</label>
-				<input class="input" id="audio" name="audio" type="text" x-bind:disabled="!isAuK || !aukNeedsSource" placeholder="https://… or data:audio/…;base64,…"/>
-				<p class="help">Use this instead of an upload. HTTP and HTTPS URLs are passed to the worker.</p>
-			</div>
-
-			<div x-show="aukAllowsPrompt" x-cloak>
-				<label class="field-label" for="prompt_audio_file">Prompt voice upload</label>
-				<input class="input" id="prompt_audio_file" name="prompt_audio_file" type="file" accept="audio/*" x-bind:disabled="!isAuK || !aukAllowsPrompt"/>
-				<p class="help">Required for zero-shot TTS; optional in Auto. Decoded limit 15 MB.</p>
-			</div>
-			<div x-show="aukAllowsPrompt" x-cloak>
-				<label class="field-label" for="prompt_audio">Prompt URL or base64</label>
-				<input class="input" id="prompt_audio" name="prompt_audio" type="text" x-bind:disabled="!isAuK || !aukAllowsPrompt" placeholder="https://… or data:audio/…;base64,…"/>
-				<p class="help">Use this instead of an upload.</p>
+			<input type="hidden" name="source_job_id" x-model="sourceTakeID" x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'render' || !sourceTakeReady"/>
+			<div x-show="aukAllowsPrompt" x-cloak class="sm:col-span-2">
+				<p class="field-label">Reference voice</p>
+				<p class="help">Zero-shot TTS uses the selected cloned voice card and its stored reference audio. Auto uses that reference when the selected card is a clone; stock cards leave Auto in instruction mode.</p>
 			</div>
 			<div x-show="aukAllowsPrompt" x-cloak class="sm:col-span-2">
-				<label class="field-label" for="prompt_text">Prompt transcript</label>
-				<textarea class="input" id="prompt_text" name="prompt_text" rows="2" x-bind:disabled="!isAuK || !aukAllowsPrompt" placeholder="Exact transcript of the prompt clip (optional)."></textarea>
+				<label class="field-label" for="prompt_text">Reference transcript override</label>
+				<textarea class="input" id="prompt_text" name="prompt_text" rows="2" x-bind:disabled="!isAuK || !aukAllowsPrompt" placeholder="Optional; otherwise Timbre uses the selected voice card's stored transcript."></textarea>
 			</div>
-
 			<div>
 				<label class="field-label" for="gen_seconds">Generation seconds</label>
 				<input class="input" id="gen_seconds" name="gen_seconds" type="number" min="0.5" max="300" step="0.1" x-bind:disabled="!isAuK" placeholder="Automatic"/>
@@ -220,7 +257,6 @@ templ Compose(available []voices.Voice, selectedID int64) {
 				<p class="help">Timbre downloads either result into your private local queue so playback outlives an expiring URL.</p>
 			</div>
 		</section>
-
 		<div class="grid gap-6 sm:grid-cols-2">
 			<div x-show="needsInstruct" x-cloak class="sm:col-span-2">
 				<label class="field-label" for="instruct">Voice instruction</label>
@@ -261,15 +297,15 @@ templ Compose(available []voices.Voice, selectedID int64) {
 			<div x-show="!isAuK">
 				<span class="field-label">Output</span>
 				<div class="flex flex-wrap gap-6 pt-1">
-					<label class="sw-toggle"><input type="checkbox" name="output_48k" checked x-bind:disabled="isAuK"/><span class="track"><span class="knob"/></span><span class="text-[13.5px]">48 kHz WAV</span></label>
-					<label class="sw-toggle"><input type="checkbox" name="normalize" x-bind:disabled="isAuK"/><span class="track"><span class="knob"/></span><span class="text-[13.5px]">Normalize</span></label>
+					<label class="sw-toggle"><input type="checkbox" name="output_48k" checked x-bind:disabled="isAuK"/><span class="track"><span class="knob"></span></span><span class="text-[13.5px]">48 kHz WAV</span></label>
+					<label class="sw-toggle"><input type="checkbox" name="normalize" x-bind:disabled="isAuK"/><span class="track"><span class="knob"></span></span><span class="text-[13.5px]">Normalize</span></label>
 				</div>
 			</div>
 		</div>
 		<div class="flex flex-wrap items-center gap-3">
-			<button type="submit" class="btn" x-text="isAuK ? 'Run AuK task' : 'Render speech'">Render speech</button>
+			<button type="submit" class="btn" x-bind:disabled="aukSourceMissing" x-text="isAuK ? 'Run AuK task' : 'Render speech'">Render speech</button>
 			<button type="button" class="btn btn--quiet" x-show="!isAuK &amp;&amp; chars > 0" x-cloak @click="script = ''; $refs.scriptBox.focus()">Clear script</button>
-			<button type="reset" class="btn btn--quiet" @click="script = ''; aukInstruction = ''; aukTask = 'instruct_tts'; aukVariant = 'flash'; setAuKDefaults()">Reset controls</button>
+			<button type="reset" class="btn btn--quiet" @click="script = ''; aukInstruction = ''; aukTask = 'instruct_tts'; aukVariant = 'flash'; audioSource = 'upload'; setAuKDefaults()">Reset controls</button>
 		</div>
 	</form>
 }
@@ -517,6 +553,13 @@ templ studioHelpers(selected int64) {
 		function timbreSelectTake(row) {
 			window.timbreTake = parseInt(row.dataset.take, 10) || 0;
 			timbrePaintTake();
+			window.dispatchEvent(new CustomEvent('timbre-source-selected', {
+				detail: {
+					id: row.dataset.take,
+					label: 'Take ' + row.dataset.take,
+					ready: row.dataset.sourceReady === 'true'
+				}
+			}));
 		}
 		// Re-assert the selection over whatever markup is currently in the DOM.
 		// The server renders the highlight and the poll URL carries the take, so
@@ -574,6 +617,105 @@ templ studioHelpers(selected int64) {
 					});
 					var self = this;
 					a.play().then(function () { self.playing = true; }, function () {});
+				}
+			};
+		};
+		// The AuK prompt assistant: a small chat loop against POST
+		// /jobs/auk-assistant. Conversation state is Alpine-only (never
+		// persisted) and a structured reply only ever reaches the instruction
+		// field through the explicit "Insert into instruction" button — never
+		// automatically, so a clarifying question can't silently overwrite text
+		// the user is mid-edit on.
+		window.aukAssistant = function () {
+			return {
+				open: false,
+				messages: [],
+				draft: '',
+				busy: false,
+				error: '',
+				// Pulls the quoted INSTRUCTION out of the assistant's fixed
+				// TASK/INSTRUCTION/REQUIRED AUDIO INPUT/NOTES block, if present.
+				// A plain clarifying question has no such block and parses to null.
+				parseInstruction: function (text) {
+					// The instruction itself often quotes a target phrase
+					// (e.g. say: "[target text]"), and an LLM does not
+					// reliably escape that inner quote against the outer
+					// INSTRUCTION: "..." wrapper — sometimes it backslash-
+					// escapes it, sometimes it leaves it bare, producing
+					// unbalanced quote counts a character-class regex cannot
+					// tell apart from the real closing quote. So don't hunt
+					// for a "matching" quote at all: the fixed output format
+					// is line-based, so the INSTRUCTION value is bounded by
+					// the next field label (or the closing code fence, or
+					// end of text) regardless of what punctuation it
+					// contains. Only the outermost quote pair — if the whole
+					// captured span happens to be wrapped in one — is ever
+					// stripped; anything quoted inside that span is left
+					// exactly as written.
+					var m = /INSTRUCTION:\s*([\s\S]*?)(?:\r?\n\s*(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:|```|$)/.exec(text);
+					if (!m) { return null; }
+					var value = m[1].trim();
+					if (!value) { return null; }
+					var wrapped = /^["'\u201c\u2018]([\s\S]*)["'\u201d\u2019]$/.exec(value);
+					if (wrapped) { value = wrapped[1]; }
+					return value.replace(/\\(["\\nrt])/g, function (whole, ch) {
+						return { '"': '"', '\\': '\\', n: '\n', r: '\r', t: '\t' }[ch];
+					});
+				},
+				// Maps the assistant's free-text "TASK: <family> — <sub-task>"
+				// line onto one of AuK's 8 worker task codes, using the exact
+				// family/sub-task vocabulary its own system prompt instructs it
+				// to use. Returns null on anything that doesn't match a known
+				// term rather than guessing wrong — a mismatched Mode is worse
+				// than an unset one (e.g. inserting a "using the reference
+				// voice provided" instruction under instruct_tts sends no
+				// reference audio to AuK at all).
+				parseTask: function (text) {
+					var m = /TASK:\s*(.+)/.exec(text);
+					if (!m) { return null; }
+					var line = m[1].toLowerCase();
+					if (line.indexOf('zero-shot') >= 0 || line.indexOf('zero shot') >= 0) { return 'zero_shot_tts'; }
+					if (line.indexOf('instruct') >= 0) { return 'instruct_tts'; }
+					if (line.indexOf('lyric') >= 0 || line.indexOf('content edit') >= 0) { return 'content_edit'; }
+					if (line.indexOf('acoustic') >= 0 || line.indexOf('speaking rate') >= 0 || line.indexOf('pitch') >= 0 || line.indexOf('loudness') >= 0) { return 'acoustic_edit'; }
+					if (line.indexOf('paralinguistic') >= 0 || line.indexOf('emotion') >= 0 || line.indexOf('timbre') >= 0 || line.indexOf('accent') >= 0 || line.indexOf('whisper') >= 0 || line.indexOf('nonverbal') >= 0) { return 'paralinguistic_edit'; }
+					if (line.indexOf('separat') >= 0) { return 'separation'; }
+					if (line.indexOf('enhance') >= 0 || line.indexOf('denois') >= 0 || line.indexOf('dereverb') >= 0 || line.indexOf('resolution') >= 0 || line.indexOf('restor') >= 0) { return 'enhancement'; }
+					return null;
+				},
+				send: function () {
+					var text = this.draft.trim();
+					if (!text || this.busy) { return; }
+					this.error = '';
+					this.messages.push({ role: 'user', content: text });
+					this.draft = '';
+					this.busy = true;
+					var self = this;
+					var payload = { messages: this.messages.map(function (m) { return { role: m.role, content: m.content }; }) };
+					fetch('/jobs/auk-assistant', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+						body: JSON.stringify(payload)
+					}).then(function (res) {
+						if (!res.ok) {
+							return res.text().then(function (body) { throw new Error(body || ('status ' + res.status)); });
+						}
+						return res.json();
+					}).then(function (data) {
+						var instruction = self.parseInstruction(data.reply);
+						self.messages.push({ role: 'assistant', content: data.reply, instruction: instruction, task: instruction ? self.parseTask(data.reply) : null });
+					}).catch(function (err) {
+						self.error = 'The assistant could not answer: ' + err.message;
+					}).finally(function () {
+						self.busy = false;
+					});
+				},
+				apply: function (instruction, task) {
+					window.dispatchEvent(new CustomEvent('timbre-assistant-apply', { detail: { instruction: instruction, task: task || null } }));
+				},
+				clear: function () {
+					this.messages = [];
+					this.error = '';
 				}
 			};
 		};

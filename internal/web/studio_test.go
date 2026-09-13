@@ -123,6 +123,22 @@ func TestQueueMarksSelectedRow(t *testing.T) {
 	}
 }
 
+func TestQueueRowsPublishReadySourceSelection(t *testing.T) {
+	html := render(t, Queue(sampleJobs(), 0, nil, 9))
+	ready := rowHTML(t, html, "job-9")
+	if !strings.Contains(ready, `data-source-ready="true"`) {
+		t.Errorf("ready row does not publish source readiness: %s", ready)
+	}
+	working := rowHTML(t, html, "job-8")
+	if !strings.Contains(working, `data-source-ready="false"`) {
+		t.Errorf("working row incorrectly advertises ready audio: %s", working)
+	}
+	page := render(t, Studio(sampleJobs(), sampleVoices(), nil, 9))
+	if !strings.Contains(page, `timbre-source-selected`) {
+		t.Error("studio helper does not publish selected queue rows to the compose form")
+	}
+}
+
 // The poll asks for the selected take by URL, so every swap re-renders the
 // highlight and the fragment that arrives asks for it again — the selection
 // sustains itself across a table that is replaced every two seconds.
@@ -183,7 +199,7 @@ func TestPlayerBodyStates(t *testing.T) {
 
 // Clearing the script is one control, not a select-all.
 func TestComposeHasClearScriptControl(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 
 	if !strings.Contains(html, "Clear script") {
 		t.Error("compose card has no clear-script control")
@@ -197,7 +213,7 @@ func TestComposeHasClearScriptControl(t *testing.T) {
 }
 
 func TestComposeEngineSelector(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 
 	for _, want := range []string{
 		`name="model"`,
@@ -385,36 +401,110 @@ func TestVoiceGridContainerIsScrollableWithMaxHeight(t *testing.T) {
 	}
 }
 
-
 func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, sampleJobs()[0]))
 	for _, want := range []string{
 		`enctype="multipart/form-data"`, `value="tencent/AuK"`,
 		`name="instruction"`, `name="task"`, `value="auto"`,
 		`value="zero_shot_tts"`, `value="instruct_tts"`,
 		`value="content_edit"`, `value="acoustic_edit"`,
 		`value="paralinguistic_edit"`, `value="enhancement"`, `value="separation"`,
-		`name="audio_file"`, `name="audio"`, `name="prompt_audio_file"`,
-		`name="prompt_audio"`, `name="prompt_text"`, `name="gen_seconds"`,
-		`name="gen_text"`, `name="model_variant"`, `value="flash"`, `value="base"`,
-		`name="nfe"`, `name="cfg_scale"`, `name="seed"`,
-		`name="response_delivery"`, `value="s3"`, `value="base64"`,
+		`name="audio_source"`, `value="upload"`, `value="render"`,
+		`name="audio_file"`, `name="source_job_id"`, `name="prompt_text"`,
+		`selected cloned voice card`, `Use selected render`, `Take 9`,
+		`name="gen_seconds"`, `name="gen_text"`, `name="model_variant"`,
+		`value="flash"`, `value="base"`, `name="nfe"`, `name="cfg_scale"`,
+		`name="seed"`, `name="response_delivery"`, `value="s3"`, `value="base64"`,
 		`decoded limit 15 MB`, `Run AuK task`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("AuK compose contract missing %q", want)
 		}
 	}
+	for _, forbidden := range []string{`name="audio"`, `name="prompt_audio"`, `name="prompt_audio_file"`} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("AuK compose contract still exposes %q", forbidden)
+		}
+	}
+}
+
+func TestComposeExposesAuKPromptAssistant(t *testing.T) {
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
+	for _, want := range []string{
+		`x-data="aukAssistant()"`,
+		`Ask the AI prompt assistant`,
+		`Ask assistant`,
+		`Clear conversation`,
+		`Insert into instruction`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("AuK assistant panel missing %q", want)
+		}
+	}
+	// The parent form must listen for the assistant's apply event and route
+	// it into both the instruction field and the Mode selector — a reply
+	// whose instruction says "using the reference voice provided" is useless
+	// if the task stays on whatever the form defaulted to (see regression:
+	// an inserted zero-shot instruction under instruct_tts sends AuK no
+	// reference audio at all, since instruct_tts forbids it outright).
+	if !strings.Contains(html, `x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; if ($event.detail.task) { aukTask = $event.detail.task }"`) {
+		t.Error("compose form does not wire the assistant's apply event into both aukInstruction and aukTask")
+	}
+	if !strings.Contains(html, `@click="apply(m.instruction, m.task)"`) {
+		t.Error("insert-into-instruction button does not forward the parsed task alongside the instruction")
+	}
+
+	// The fetch target, the aukAssistant() factory and its task parser all
+	// live in the shared studioHelpers script, rendered once per page
+	// alongside Compose rather than inside it — same split as
+	// timbre-source-selected.
+	page := render(t, Studio(sampleJobs(), sampleVoices(), nil, 9))
+	for _, want := range []string{
+		`window.aukAssistant`, `/jobs/auk-assistant`, `timbre-assistant-apply`,
+		`parseTask:`, `zero_shot_tts`, `instruct_tts`, `content_edit`,
+		`acoustic_edit`, `paralinguistic_edit`, `separation`, `enhancement`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("studioHelpers script missing %q", want)
+		}
+	}
+
+	// Regression (root cause, confirmed against a real reply): the
+	// INSTRUCTION value itself often quotes a target phrase (say: "..."),
+	// and an LLM does not reliably escape that inner quote against the
+	// outer INSTRUCTION: "..." wrapper — sometimes backslash-escaped,
+	// sometimes left bare. Either way a character-class regex trying to
+	// find the "matching" closing quote cannot tell a real closing quote
+	// from an unescaped inner one, and truncates there. The fix must bound
+	// the value by the fixed format's line structure (next field label /
+	// code fence / end of text) instead of by quote-matching, and only
+	// strip the outermost quote pair from whatever it captures.
+	if strings.Contains(page, `/INSTRUCTION:\s*"([^"]*)"/`) {
+		t.Error("parseInstruction regressed to the naive pattern that truncates on any quote")
+	}
+	if strings.Contains(page, `(?:\\.|[^"\\])*`) {
+		t.Error("parseInstruction regressed to character-class quote-matching, which cannot survive an unescaped inner quote")
+	}
+	if !strings.Contains(page, `(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:`) {
+		t.Error("parseInstruction does not bound the INSTRUCTION value by the next field label")
+	}
+	if !strings.Contains(page, `^["'\u201c\u2018]([\s\S]*)["'\u201d\u2019]$`) {
+		t.Error("parseInstruction does not strip exactly the outermost quote pair (straight or typographic)")
+	}
+	if !strings.Contains(page, `.replace(/\\(["\\nrt])/g`) {
+		t.Error("parseInstruction does not unescape backslash sequences a properly-escaped reply may still carry")
+	}
 }
 
 func TestComposeDisablesEngineSpecificFields(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 	for _, want := range []string{
-		`x-bind:disabled="!isAuK || !aukNeedsSource"`,
-		`x-bind:disabled="!isAuK || !aukAllowsPrompt"`,
+		`x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'upload'"`,
+		`x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'render' || !sourceTakeReady"`,
 		`x-bind:disabled="isAuK"`,
 		`x-bind:disabled="!isBreeze"`,
 		`x-bind:disabled="!needsVoice"`,
+		`x-bind:disabled="aukSourceMissing"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("conditional field contract missing %q", want)
