@@ -83,6 +83,42 @@ reference, rendered in itself.
   `auto|s3|base64` delivery. AuK zero-TTS and Auto-with-clone jobs retain the
   selected cloned card's `voice_id`; Timbre authorization-checks that card and
   copies its stored reference into a private job-owned `prompt_audio_path`.
+  `zero_shot_tts` and `instruct_tts` additionally *require* `gen_seconds`
+  (`ValidateAuKInput`; the UI shows a required-field warning until one is
+  set). Both tasks have no audio whose length the worker can measure — for
+  zero-shot the "audio" is the voice reference clip, not the target phrase,
+  and the worker's own fallback ("intentionally preserves the source
+  duration") makes it silently match the reference clip's length; for
+  instruct_tts there is no audio at all, so it falls back to a flat few
+  seconds regardless of content length. Both have been observed producing
+  wrong-length or wrong-content output, confirmed against
+  `sruckh/tencent-auk`'s `engine.py` and the official `Tencent-Hunyuan/AuK`
+  cookbook, which always pairs these tasks' `--instruction` with an explicit
+  `--gen_seconds`. There is no `gen_text` field — the worker's own
+  duration-from-text heuristic proved unreliable in practice (too fast: a
+  phrase whose heuristic estimate was ~2s needed ~4s to render correctly).
+  Instead, the studio auto-fills `gen_seconds` locally from whatever target
+  text the task is driven by (roughly 1 second per 10 non-whitespace
+  characters), fully editable/overridable once the user touches the
+  Generation seconds field directly. For `instruct_tts`/`auto` this text
+  comes from the standalone "Target text (for duration estimate)" field — a
+  client-only value (no `name` attribute, never submitted) that exists only
+  to drive this estimate, alongside the manually-typed Instruction field.
+  For `zero_shot_tts` specifically the UI drops the free-form Instruction
+  field entirely: the user only ever types "Text to speak", and a hidden
+  `instruction` input reactively composes AuK's exact canonical wrapper
+  (`Say the following with the same voice: "<text>"`, matching the official
+  cookbook) and submits that — one text field does double duty as both the
+  duration-estimate source and the literal spoken content, since for this
+  task they are the same string. The AI prompt assistant's "Insert into
+  instruction" bypasses this auto-composition (it sets the full instruction
+  and marks it user-touched) but still extracts the trailing quoted target
+  phrase from its reply into the text field, so the duration estimate stays
+  correct either way. The reference card's stored transcript is never
+  auto-sent as `prompt_text` (the worker has no dedicated transcript
+  parameter and instead concatenates it onto the instruction text, which can
+  also skew output) — the form exposes it only as an explicit, opt-in
+  override field.
   Stock cards have no reference: explicit zero-shot rejects them, while Auto
   falls back to instruction TTS. Edit/enhance/separation tasks take exactly one
   source: multipart `audio_file` or the user's selected ready render

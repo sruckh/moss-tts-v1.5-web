@@ -295,7 +295,6 @@ func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]an
 		Instruction:      strings.TrimSpace(r.PostFormValue("instruction")),
 		Audio:            auKValidationAudio(audio, audioPath),
 		PromptText:       strings.TrimSpace(r.PostFormValue("prompt_text")),
-		GenText:          strings.TrimSpace(r.PostFormValue("gen_text")),
 		ModelVariant:     strings.TrimSpace(r.PostFormValue("model_variant")),
 		ResponseDelivery: strings.TrimSpace(r.PostFormValue("response_delivery")),
 	}
@@ -350,9 +349,15 @@ func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]an
 					paths = append(paths, promptPath)
 					params["prompt_audio_path"] = promptPath
 					in.PromptAudio = auKValidationAudio("", promptPath)
-					if in.PromptText == "" && voice.ReferenceTranscript.Valid {
-						in.PromptText = strings.TrimSpace(voice.ReferenceTranscript.V)
-					}
+					// Deliberately not auto-filled from voice.ReferenceTranscript.
+					// The AuK worker has no dedicated transcript parameter — it
+					// concatenates prompt_text onto the instruction text itself
+					// ("\nReference audio transcript: ...", confirmed in
+					// sruckh/tencent-auk's engine.py). A short reference clip
+					// paired with a multi-sentence stored transcript has been
+					// observed making the model echo the reference instead of
+					// the target phrase. The form's override field remains
+					// available for a user who wants to opt into trying one.
 				}
 			}
 		}
@@ -402,9 +407,6 @@ func (s *Server) parseAuKJobParams(r *http.Request, userID int64) (map[string]an
 	}
 	if in.GenSeconds != 0 {
 		params["gen_seconds"] = in.GenSeconds
-	}
-	if in.GenText != "" {
-		params["gen_text"] = in.GenText
 	}
 	if in.Seed != nil {
 		params["seed"] = *in.Seed

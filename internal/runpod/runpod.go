@@ -582,7 +582,6 @@ type AuKInput struct {
 	PromptAudio      string
 	PromptText       string
 	GenSeconds       float64
-	GenText          string
 	ModelVariant     string
 	NFE              int
 	CfgScale         float64
@@ -613,9 +612,6 @@ func (in AuKInput) MarshalJSON() ([]byte, error) {
 	}
 	if in.GenSeconds != 0 {
 		payload["gen_seconds"] = in.GenSeconds
-	}
-	if in.GenText != "" {
-		payload["gen_text"] = in.GenText
 	}
 	if in.Seed != nil {
 		payload["seed"] = *in.Seed
@@ -727,9 +723,27 @@ func ValidateAuKInput(in AuKInput) error {
 		if in.Audio != "" {
 			return &AuKValidationError{Reason: "zero_shot_tts forbids audio"}
 		}
+		// The worker leaves gen_seconds at nil when it is not given and
+		// reference/prompt audio is present, which it documents as
+		// "intentionally preserves the source duration" — for zero-shot
+		// that source is the voice reference clip, not the target phrase,
+		// so an unhinted request has been observed making the model speak
+		// the reference clip's own content instead. Confirmed against the
+		// official Tencent-Hunyuan/AuK cookbook, which always pairs a
+		// zero-shot --instruction with an explicit --gen_seconds.
+		if in.GenSeconds == 0 {
+			return &AuKValidationError{Reason: "zero_shot_tts requires gen_seconds to hint the target duration"}
+		}
 	case AuKTaskInstructTTS:
 		if in.Audio != "" || in.PromptAudio != "" {
 			return &AuKValidationError{Reason: "instruct_tts forbids audio and prompt_audio"}
+		}
+		// instruct_tts has no audio at all, so the worker falls back to a
+		// flat 7-second default when gen_seconds is unset — decoupled from
+		// the actual target text length. The cookbook always pairs this
+		// task's --instruction with an explicit --gen_seconds too.
+		if in.GenSeconds == 0 {
+			return &AuKValidationError{Reason: "instruct_tts requires gen_seconds to hint the target duration"}
 		}
 	case AuKTaskContentEdit, AuKTaskAcousticEdit, AuKTaskParalinguisticEdit, AuKTaskEnhancement, AuKTaskSeparation:
 		if in.Audio == "" {

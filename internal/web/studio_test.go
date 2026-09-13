@@ -412,7 +412,7 @@ func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
 		`name="audio_source"`, `value="upload"`, `value="render"`,
 		`name="audio_file"`, `name="source_job_id"`, `name="prompt_text"`,
 		`selected cloned voice card`, `Use selected render`, `Take 9`,
-		`name="gen_seconds"`, `name="gen_text"`, `name="model_variant"`,
+		`name="gen_seconds"`, `id="auk_text_hint"`, `name="model_variant"`,
 		`value="flash"`, `value="base"`, `name="nfe"`, `name="cfg_scale"`,
 		`name="seed"`, `name="response_delivery"`, `value="s3"`, `value="base64"`,
 		`decoded limit 15 MB`, `Run AuK task`,
@@ -421,7 +421,7 @@ func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
 			t.Errorf("AuK compose contract missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{`name="audio"`, `name="prompt_audio"`, `name="prompt_audio_file"`} {
+	for _, forbidden := range []string{`name="audio"`, `name="prompt_audio"`, `name="prompt_audio_file"`, `name="gen_text"`} {
 		if strings.Contains(html, forbidden) {
 			t.Errorf("AuK compose contract still exposes %q", forbidden)
 		}
@@ -447,8 +447,8 @@ func TestComposeExposesAuKPromptAssistant(t *testing.T) {
 	// if the task stays on whatever the form defaulted to (see regression:
 	// an inserted zero-shot instruction under instruct_tts sends AuK no
 	// reference audio at all, since instruct_tts forbids it outright).
-	if !strings.Contains(html, `x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; if ($event.detail.task) { aukTask = $event.detail.task }"`) {
-		t.Error("compose form does not wire the assistant's apply event into both aukInstruction and aukTask")
+	if !strings.Contains(html, `x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; aukInstructionTouched = true; if ($event.detail.task) { aukTask = $event.detail.task }; if ($event.detail.text) { aukTextHint = $event.detail.text; genSecondsTouched = false }"`) {
+		t.Error("compose form does not wire the assistant's apply event into aukInstruction, aukTask and aukTextHint")
 	}
 	if !strings.Contains(html, `@click="apply(m.instruction, m.task)"`) {
 		t.Error("insert-into-instruction button does not forward the parsed task alongside the instruction")
@@ -469,27 +469,36 @@ func TestComposeExposesAuKPromptAssistant(t *testing.T) {
 		}
 	}
 
-	// Regression (root cause, confirmed against a real reply): the
-	// INSTRUCTION value itself often quotes a target phrase (say: "..."),
-	// and an LLM does not reliably escape that inner quote against the
-	// outer INSTRUCTION: "..." wrapper — sometimes backslash-escaped,
-	// sometimes left bare. Either way a character-class regex trying to
-	// find the "matching" closing quote cannot tell a real closing quote
-	// from an unescaped inner one, and truncates there. The fix must bound
-	// the value by the fixed format's line structure (next field label /
-	// code fence / end of text) instead of by quote-matching, and only
-	// strip the outermost quote pair from whatever it captures.
+	// Regression history, each confirmed against a real reply that broke
+	// the prior approach:
+	//   1. A naive [^"]* character class truncates on the first quote,
+	//      escaped or not, inside the instruction's own quoted phrase
+	//      (say: "...").
+	//   2. Bounding the capture by "the next known field, or a closing
+	//      fence, or end of text" over-captures into free-form follow-up
+	//      prose whenever a reply breaks format and omits those later
+	//      fields (e.g. a mixed "here's the block, but I still need X"
+	//      reply) — that garbled, self-contradictory text is what actually
+	//      got submitted to AuK and is the likely reason it echoed the
+	//      reference clip instead of the target phrase.
+	// The fix must bound the value to its own single line — the fixed
+	// format never wraps INSTRUCTION across lines — and must strip
+	// delimiters only from the exact first/last character, never by
+	// hunting for a "matching" quote inside the value.
 	if strings.Contains(page, `/INSTRUCTION:\s*"([^"]*)"/`) {
 		t.Error("parseInstruction regressed to the naive pattern that truncates on any quote")
 	}
 	if strings.Contains(page, `(?:\\.|[^"\\])*`) {
 		t.Error("parseInstruction regressed to character-class quote-matching, which cannot survive an unescaped inner quote")
 	}
-	if !strings.Contains(page, `(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:`) {
-		t.Error("parseInstruction does not bound the INSTRUCTION value by the next field label")
+	if strings.Contains(page, `(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:|`+"`"+"`"+"`"+`|\$\)/`) {
+		t.Error("parseInstruction regressed to bounding by a later field/fence/end-of-text, which over-captures trailing prose when a reply omits them")
 	}
-	if !strings.Contains(page, `^["'\u201c\u2018]([\s\S]*)["'\u201d\u2019]$`) {
-		t.Error("parseInstruction does not strip exactly the outermost quote pair (straight or typographic)")
+	if !strings.Contains(page, `/INSTRUCTION:\s*(.+)/`) {
+		t.Error("parseInstruction does not bound the INSTRUCTION value to its own single line")
+	}
+	if !strings.Contains(page, `pairs = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019']]`) {
+		t.Error("parseInstruction does not strip a known delimiter pair from exactly the first/last character")
 	}
 	if !strings.Contains(page, `.replace(/\\(["\\nrt])/g`) {
 		t.Error("parseInstruction does not unescape backslash sequences a properly-escaped reply may still carry")

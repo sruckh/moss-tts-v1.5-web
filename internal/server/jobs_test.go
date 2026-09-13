@@ -941,7 +941,7 @@ func baseAuKFields(task string) map[string]string {
 		"model": jobs.AuKModel, "task": task,
 		"instruction": "perform the requested task", "model_variant": runpod.AuKVariantFlash,
 		"nfe": "4", "cfg_scale": "0", "response_delivery": runpod.AuKDeliveryBase64,
-		"seed": "7",
+		"seed": "7", "gen_seconds": "6",
 	}
 }
 
@@ -1026,8 +1026,13 @@ func TestCreateJobAuKTaskMatrix(t *testing.T) {
 				if _, ok := params["prompt_audio_path"].(string); !ok {
 					t.Fatalf("selected clone was not copied into params: %#v", params)
 				}
-				if params["prompt_text"] != "reference words" {
-					t.Fatalf("stored transcript not reused: %#v", params)
+				// Deliberately NOT auto-filled from the voice's stored
+				// transcript — the AuK worker has no dedicated transcript
+				// parameter and concatenates prompt_text onto the
+				// instruction text itself, which has been observed making
+				// it echo the reference instead of the target phrase.
+				if _, ok := params["prompt_text"]; ok {
+					t.Fatalf("prompt_text was auto-filled from the voice's stored transcript: %#v", params)
 				}
 			}
 			// Flash coerces cfg_scale to 0 and pins nfe 4: the persisted job
@@ -1043,12 +1048,19 @@ func TestCreateJobAuKValidation(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
 	stockID := firstVoiceID(t, srv, cookie)
+	cloneID := createAuKClone(t, srv)
 	tests := []struct {
 		name   string
 		mutate func(map[string]string)
 	}{
 		{"missing instruction", func(f map[string]string) { delete(f, "instruction") }},
 		{"zero shot missing voice", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS }},
+		{"zero shot missing duration hint", func(f map[string]string) {
+			f["task"] = runpod.AuKTaskZeroShotTTS
+			f["voice_id"] = strconv.FormatInt(cloneID, 10)
+			delete(f, "gen_seconds")
+		}},
+		{"instruct missing duration hint", func(f map[string]string) { delete(f, "gen_seconds") }},
 		{"zero shot stock voice", func(f map[string]string) {
 			f["task"] = runpod.AuKTaskZeroShotTTS
 			f["voice_id"] = strconv.FormatInt(stockID, 10)
@@ -1218,6 +1230,7 @@ func TestCreateJobAuKURLEncodedWithoutFiles(t *testing.T) {
 		"model": {jobs.AuKModel}, "task": {runpod.AuKTaskInstructTTS},
 		"instruction": {"urlencoded api request"}, "model_variant": {runpod.AuKVariantFlash},
 		"nfe": {"4"}, "cfg_scale": {"0"}, "response_delivery": {runpod.AuKDeliveryBase64},
+		"gen_seconds": {"6"},
 	}
 	rec := postJob(t, srv, cookie, form, "application/json")
 	if rec.Code != http.StatusOK {

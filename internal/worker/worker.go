@@ -806,7 +806,6 @@ func (w *Worker) buildAuKInput(job jobs.Job) (runpod.AuKInput, error) {
 		Audio:            audio,
 		PromptAudio:      promptAudio,
 		PromptText:       breezeParamString(params, "prompt_text"),
-		GenText:          breezeParamString(params, "gen_text"),
 		ModelVariant:     breezeParamString(params, "model_variant"),
 		ResponseDelivery: breezeParamString(params, "response_delivery"),
 	}

@@ -1196,11 +1196,13 @@ func TestValidateAuKInputTaskMatrix(t *testing.T) {
 		input   AuKInput
 		wantErr bool
 	}{
-		{"instruct", validAuKInput(AuKTaskInstructTTS), false},
+		{"instruct", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.GenSeconds = 6; return in }(), false},
 		{"instruct forbids source", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.Audio = "YQ=="; return in }(), true},
-		{"zero shot", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; return in }(), false},
+		{"instruct missing duration hint", validAuKInput(AuKTaskInstructTTS), true},
+		{"zero shot", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; in.GenSeconds = 6; return in }(), false},
 		{"zero shot missing prompt", validAuKInput(AuKTaskZeroShotTTS), true},
-		{"zero shot forbids source", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; in.Audio = "YQ=="; return in }(), true},
+		{"zero shot forbids source", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; in.Audio = "YQ=="; in.GenSeconds = 6; return in }(), true},
+		{"zero shot missing duration hint", func() AuKInput { in := validAuKInput(AuKTaskZeroShotTTS); in.PromptAudio = "YQ=="; return in }(), true},
 		{"content edit", func() AuKInput { in := validAuKInput(AuKTaskContentEdit); in.Audio = "YQ=="; return in }(), false},
 		{"acoustic edit", func() AuKInput { in := validAuKInput(AuKTaskAcousticEdit); in.Audio = "YQ=="; return in }(), false},
 		{"paralinguistic edit", func() AuKInput { in := validAuKInput(AuKTaskParalinguisticEdit); in.Audio = "YQ=="; return in }(), false},
@@ -1208,10 +1210,10 @@ func TestValidateAuKInputTaskMatrix(t *testing.T) {
 		{"separation", func() AuKInput { in := validAuKInput(AuKTaskSeparation); in.Audio = "YQ=="; return in }(), false},
 		{"edit missing source", validAuKInput(AuKTaskContentEdit), true},
 		{"edit forbids prompt", func() AuKInput { in := validAuKInput(AuKTaskContentEdit); in.Audio = "YQ=="; in.PromptAudio = "YQ=="; return in }(), true},
-		{"auto instruct", validAuKInput(AuKTaskAuto), false},
-		{"auto zero shot", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.PromptAudio = "YQ=="; return in }(), false},
+		{"auto instruct", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.GenSeconds = 6; return in }(), false},
+		{"auto zero shot", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.PromptAudio = "YQ=="; in.GenSeconds = 6; return in }(), false},
 		{"auto rejects bare source", func() AuKInput { in := validAuKInput(AuKTaskAuto); in.Audio = "YQ=="; return in }(), true},
-		{"prompt text without prompt", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.PromptText = "hello"; return in }(), true},
+		{"prompt text without prompt", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.PromptText = "hello"; in.GenSeconds = 6; return in }(), true},
 		{"missing instruction", func() AuKInput { in := validAuKInput(AuKTaskInstructTTS); in.Instruction = ""; return in }(), true},
 		{"invalid task", validAuKInput("weave"), true},
 	}
@@ -1262,6 +1264,7 @@ func TestValidateAuKInputVariantAndDeliveryBounds(t *testing.T) {
 	for _, nfe := range []int{1, 8} {
 		in := validAuKInput(AuKTaskInstructTTS)
 		in.NFE = nfe
+		in.GenSeconds = 6
 		if err := ValidateAuKInput(in); err != nil {
 			t.Errorf("flash boundary nfe=%d: %v", nfe, err)
 		}
@@ -1269,6 +1272,7 @@ func TestValidateAuKInputVariantAndDeliveryBounds(t *testing.T) {
 	for _, nfe := range []int{16, 64} {
 		in := validAuKInput(AuKTaskInstructTTS)
 		in.ModelVariant, in.NFE, in.CfgScale = AuKVariantBase, nfe, 2
+		in.GenSeconds = 6
 		if err := ValidateAuKInput(in); err != nil {
 			t.Errorf("base boundary nfe=%d: %v", nfe, err)
 		}
@@ -1288,7 +1292,7 @@ func TestSubmitAuKPayloadAndDistinctEndpoint(t *testing.T) {
 	in := AuKInput{
 		Task: AuKTaskZeroShotTTS, Instruction: `Say "hello" with the same voice.`,
 		PromptAudio: "YQ==", PromptText: "sample", GenSeconds: 2.5,
-		GenText: "hello", ModelVariant: AuKVariantBase, NFE: 32,
+		ModelVariant: AuKVariantBase, NFE: 32,
 		CfgScale: 2.5, Seed: &seed, ResponseDelivery: AuKDeliveryS3,
 	}
 	client := New("", "shared", WithAuKEndpoint(server.URL), WithHTTPClient(server.Client()))
@@ -1302,7 +1306,7 @@ func TestSubmitAuKPayloadAndDistinctEndpoint(t *testing.T) {
 	for key, want := range map[string]any{
 		"task": AuKTaskZeroShotTTS, "instruction": in.Instruction,
 		"prompt_audio": "YQ==", "prompt_text": "sample",
-		"gen_seconds": 2.5, "gen_text": "hello", "model_variant": AuKVariantBase,
+		"gen_seconds": 2.5, "model_variant": AuKVariantBase,
 		"nfe": float64(32), "cfg_scale": 2.5, "seed": float64(42),
 		"response_delivery": AuKDeliveryS3,
 	} {

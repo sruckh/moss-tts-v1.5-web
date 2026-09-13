@@ -1276,6 +1276,7 @@ func TestAuKZeroShotBypassesVoiceTranscriptionGate(t *testing.T) {
 		"task": runpod.AuKTaskZeroShotTTS, "prompt_audio_path": promptPath,
 		"model_variant": runpod.AuKVariantFlash, "nfe": 4,
 		"cfg_scale": 0, "response_delivery": runpod.AuKDeliveryBase64,
+		"gen_seconds": 6,
 	})
 	client := &fakeSubmitter{id: "auk-zero-shot"}
 	whisper := &fakeWhisper{err: errors.New("must not be called")}
@@ -1317,7 +1318,7 @@ func TestAuKTransientSubmitFailureRetainsInputForRetry(t *testing.T) {
 
 func TestBuildAuKInputPreservesURLAndParameters(t *testing.T) {
 	h := newHarness(t)
-	job := jobs.Job{Text: "say hello", Model: jobs.AuKModel, ParamsJSON: `{"task":"zero_shot_tts","prompt_audio":"https://example.test/prompt.wav","prompt_text":"hello","gen_seconds":2.5,"gen_text":"hello","model_variant":"base","nfe":32,"cfg_scale":2.5,"seed":99,"response_delivery":"s3"}`}
+	job := jobs.Job{Text: "say hello", Model: jobs.AuKModel, ParamsJSON: `{"task":"zero_shot_tts","prompt_audio":"https://example.test/prompt.wav","prompt_text":"hello","gen_seconds":2.5,"model_variant":"base","nfe":32,"cfg_scale":2.5,"seed":99,"response_delivery":"s3"}`}
 	in, err := h.worker(&fakeSubmitter{}, 1).buildAuKInput(job)
 	if err != nil {
 		t.Fatalf("buildAuKInput: %v", err)
