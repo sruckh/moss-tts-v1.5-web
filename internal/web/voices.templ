@@ -63,6 +63,15 @@ func transcriptionReady(v voices.Voice) bool {
 	return v.ReferenceTranscript.Valid && strings.TrimSpace(v.ReferenceTranscript.V) != ""
 }
 
+func hasPendingTranscription(items []voices.Voice) bool {
+	for _, v := range items {
+		if v.Kind == voices.KindCloned && !transcriptionReady(v) {
+			return true
+		}
+	}
+	return false
+}
+
 // permissiveLicense reports whether a stock model's license is a known
 // permissive one whose commercial-safety we can state outright.
 func permissiveLicense(label string) bool {
@@ -116,19 +125,36 @@ templ VoiceLibrary(items []voices.Voice) {
 // and by the upload handler (so HTMX can refresh it in place). Its root carries
 // id="voice-grid".
 templ VoiceGrid(items []voices.Voice, selectedID int64) {
-	<div id="voice-grid" class="grid gap-4 sm:grid-cols-2 scrollable-list max-h-[670px] pr-1">
-		if len(items) == 0 {
-			<div class="empty col-span-full">
-				<span class="badge badge--live"><span class="dot"></span> No voices yet</span>
-				<h4>Your voice library is quiet</h4>
-				<p>Drop a short reference clip above to clone your first voice — thirty seconds of clean speech is plenty.</p>
-			</div>
-		} else {
-			for _, v := range items {
-				@voiceCard(v, v.ID == selectedID)
-			}
+	if hasPendingTranscription(items) {
+		<div
+			id="voice-grid"
+			class="grid gap-4 sm:grid-cols-2 scrollable-list max-h-[670px] pr-1"
+			hx-get="/voices/grid"
+			hx-trigger="every 3s"
+			hx-target="this"
+			hx-swap="outerHTML show:none"
+		>
+			@voiceGridCards(items, selectedID)
+		</div>
+	} else {
+		<div id="voice-grid" class="grid gap-4 sm:grid-cols-2 scrollable-list max-h-[670px] pr-1">
+			@voiceGridCards(items, selectedID)
+		</div>
+	}
+}
+
+templ voiceGridCards(items []voices.Voice, selectedID int64) {
+	if len(items) == 0 {
+		<div class="empty col-span-full">
+			<span class="badge badge--live"><span class="dot"></span> No voices yet</span>
+			<h4>Your voice library is quiet</h4>
+			<p>Drop a short reference clip above to clone your first voice — thirty seconds of clean speech is plenty.</p>
+		</div>
+	} else {
+		for _, v := range items {
+			@voiceCard(v, v.ID == selectedID)
 		}
-	</div>
+	}
 }
 
 // voiceCard is one selectable voice: name, model · license, a Teal fingerprint,
@@ -217,6 +243,18 @@ templ voiceCard(v voices.Voice, selected bool) {
 					@click.stop="editing = !editing"
 					aria-label={ "Rename " + v.Name }
 				>Rename</button>
+				if v.CanDelete {
+					<button
+						type="button"
+						class="btn btn--quiet btn--sm text-burnt"
+						@click.stop
+						hx-delete={ "/voices/" + strconv.FormatInt(v.ID, 10) }
+						hx-target="#voice-grid"
+						hx-swap="outerHTML show:none"
+						hx-confirm={ "Delete " + v.Name + " and its reference audio? This cannot be undone." }
+						aria-label={ "Delete " + v.Name }
+					>Delete</button>
+				}
 				<audio
 					x-ref="ref"
 					data-ref-preview

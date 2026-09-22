@@ -5,17 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"mime/multipart"
 	"os"
-	"reflect"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/jobs"
 	"github.com/sruckh/timbre/internal/runpod"
 	"github.com/sruckh/timbre/internal/voices"
@@ -57,7 +58,6 @@ func postJob(t *testing.T, srv *Server, cookie *http.Cookie, form url.Values, ac
 	srv.ServeHTTP(rec, req)
 	return rec
 }
-
 
 func postMultipartJob(t *testing.T, srv *Server, cookie *http.Cookie, fields map[string]string, files map[string][]byte) *httptest.ResponseRecorder {
 	t.Helper()
@@ -936,41 +936,78 @@ func TestHiddenBreezeFieldsDoNotLeakIntoOtherEngines(t *testing.T) {
 	}
 }
 
-
 func baseAuKFields(task string) map[string]string {
 	return map[string]string{
 		"model": jobs.AuKModel, "task": task,
 		"instruction": "perform the requested task", "model_variant": runpod.AuKVariantFlash,
 		"nfe": "4", "cfg_scale": "0", "response_delivery": runpod.AuKDeliveryBase64,
-		"seed": "7",
+		"seed": "7", "gen_seconds": "6",
 	}
+}
+
+func createAuKClone(t *testing.T, srv *Server) int64 {
+	t.Helper()
+	id, err := srv.voices.CreateCloned(context.Background(), 1, "AuK reference", ".wav", []byte("RIFF-reference"))
+	if err != nil {
+		t.Fatalf("CreateCloned: %v", err)
+	}
+	if err := srv.voices.SetReferenceTranscript(context.Background(), id, "reference words"); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	return id
+}
+
+func createReadyRender(t *testing.T, srv *Server, userID, voiceID int64, data []byte) jobs.Job {
+	t.Helper()
+	id, err := srv.jobs.Enqueue(context.Background(), jobs.NewJob{
+		UserID: userID, VoiceID: voiceID, Text: "ready source", Model: jobs.DefaultModel,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue source render: %v", err)
+	}
+	path := filepath.Join(srv.cfg.AudioDir, "source-"+strconv.FormatInt(id, 10)+".wav")
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatalf("write source render: %v", err)
+	}
+	if err := srv.jobs.MarkReady(context.Background(), id, path, "wav", 24000, 0, 0, ""); err != nil {
+		t.Fatalf("MarkReady source render: %v", err)
+	}
+	job, err := srv.jobs.Get(context.Background(), id, userID)
+	if err != nil {
+		t.Fatalf("Get source render: %v", err)
+	}
+	return job
 }
 
 func TestCreateJobAuKTaskMatrix(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
+	stockID := firstVoiceID(t, srv, cookie)
+	cloneID := createAuKClone(t, srv)
 	valid := []struct {
-		name   string
-		task   string
-		fields map[string]string
+		name      string
+		task      string
+		voiceID   int64
+		files     map[string][]byte
+		wantVoice int64
 	}{
-		{"instruct", runpod.AuKTaskInstructTTS, nil},
-		{"zero shot", runpod.AuKTaskZeroShotTTS, map[string]string{"prompt_audio": "YQ==", "prompt_text": "sample"}},
-		{"content edit", runpod.AuKTaskContentEdit, map[string]string{"audio": "YQ=="}},
-		{"acoustic edit", runpod.AuKTaskAcousticEdit, map[string]string{"audio": "YQ=="}},
-		{"paralinguistic edit", runpod.AuKTaskParalinguisticEdit, map[string]string{"audio": "YQ=="}},
-		{"enhancement", runpod.AuKTaskEnhancement, map[string]string{"audio": "YQ=="}},
-		{"separation", runpod.AuKTaskSeparation, map[string]string{"audio": "YQ=="}},
-		{"auto instruct", runpod.AuKTaskAuto, nil},
-		{"auto zero shot", runpod.AuKTaskAuto, map[string]string{"prompt_audio": "YQ=="}},
+		{"instruct", runpod.AuKTaskInstructTTS, 0, nil, 0},
+		{"zero shot", runpod.AuKTaskZeroShotTTS, cloneID, nil, cloneID},
+		{"content edit", runpod.AuKTaskContentEdit, 0, map[string][]byte{"audio_file": []byte("RIFF-source")}, 0},
+		{"acoustic edit", runpod.AuKTaskAcousticEdit, 0, map[string][]byte{"audio_file": []byte("RIFF-source")}, 0},
+		{"paralinguistic edit", runpod.AuKTaskParalinguisticEdit, 0, map[string][]byte{"audio_file": []byte("RIFF-source")}, 0},
+		{"enhancement", runpod.AuKTaskEnhancement, 0, map[string][]byte{"audio_file": []byte("RIFF-source")}, 0},
+		{"separation", runpod.AuKTaskSeparation, 0, map[string][]byte{"audio_file": []byte("RIFF-source")}, 0},
+		{"auto instruct from stock", runpod.AuKTaskAuto, stockID, nil, 0},
+		{"auto zero shot from clone", runpod.AuKTaskAuto, cloneID, nil, cloneID},
 	}
 	for _, tc := range valid {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := baseAuKFields(tc.task)
-			for key, value := range tc.fields {
-				fields[key] = value
+			if tc.voiceID > 0 {
+				fields["voice_id"] = strconv.FormatInt(tc.voiceID, 10)
 			}
-			rec := postMultipartJob(t, srv, cookie, fields, nil)
+			rec := postMultipartJob(t, srv, cookie, fields, tc.files)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, body=%q", rec.Code, rec.Body.String())
 			}
@@ -978,12 +1015,25 @@ func TestCreateJobAuKTaskMatrix(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
 				t.Fatalf("decode job: %v", err)
 			}
-			if job.Model != jobs.AuKModel || job.VoiceID != 0 || job.Text != fields["instruction"] {
-				t.Fatalf("job = %+v", job)
+			if job.Model != jobs.AuKModel || job.VoiceID != tc.wantVoice || job.Text != fields["instruction"] {
+				t.Fatalf("job = %+v, want voice %d", job, tc.wantVoice)
 			}
 			params := job.Params()
 			if params["task"] != tc.task || params["model_variant"] != runpod.AuKVariantFlash {
 				t.Fatalf("params = %#v", params)
+			}
+			if tc.wantVoice > 0 {
+				if _, ok := params["prompt_audio_path"].(string); !ok {
+					t.Fatalf("selected clone was not copied into params: %#v", params)
+				}
+				// Deliberately NOT auto-filled from the voice's stored
+				// transcript — the AuK worker has no dedicated transcript
+				// parameter and concatenates prompt_text onto the
+				// instruction text itself, which has been observed making
+				// it echo the reference instead of the target phrase.
+				if _, ok := params["prompt_text"]; ok {
+					t.Fatalf("prompt_text was auto-filled from the voice's stored transcript: %#v", params)
+				}
 			}
 			// Flash coerces cfg_scale to 0 and pins nfe 4: the persisted job
 			// records what the render will actually use.
@@ -997,23 +1047,46 @@ func TestCreateJobAuKTaskMatrix(t *testing.T) {
 func TestCreateJobAuKValidation(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
+	stockID := firstVoiceID(t, srv, cookie)
+	cloneID := createAuKClone(t, srv)
 	tests := []struct {
 		name   string
 		mutate func(map[string]string)
 	}{
 		{"missing instruction", func(f map[string]string) { delete(f, "instruction") }},
-		{"zero shot missing prompt", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS }},
-		{"instruct source forbidden", func(f map[string]string) { f["audio"] = "YQ==" }},
+		{"zero shot missing voice", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS }},
+		{"zero shot missing duration hint", func(f map[string]string) {
+			f["task"] = runpod.AuKTaskZeroShotTTS
+			f["voice_id"] = strconv.FormatInt(cloneID, 10)
+			delete(f, "gen_seconds")
+		}},
+		{"instruct missing duration hint", func(f map[string]string) { delete(f, "gen_seconds") }},
+		{"zero shot stock voice", func(f map[string]string) {
+			f["task"] = runpod.AuKTaskZeroShotTTS
+			f["voice_id"] = strconv.FormatInt(stockID, 10)
+		}},
+		{"instruct direct source forbidden", func(f map[string]string) { f["audio"] = "YQ==" }},
 		{"edit missing source", func(f map[string]string) { f["task"] = runpod.AuKTaskContentEdit }},
-		{"edit prompt forbidden", func(f map[string]string) { f["task"] = runpod.AuKTaskContentEdit; f["audio"] = "YQ=="; f["prompt_audio"] = "YQ==" }},
-		{"auto bare source", func(f map[string]string) { f["task"] = runpod.AuKTaskAuto; f["audio"] = "YQ==" }},
+		{"edit prompt upload forbidden", func(f map[string]string) { f["task"] = runpod.AuKTaskContentEdit; f["prompt_audio"] = "YQ==" }},
+		{"auto direct source forbidden", func(f map[string]string) { f["task"] = runpod.AuKTaskAuto; f["audio"] = "YQ==" }},
 		{"prompt text alone", func(f map[string]string) { f["prompt_text"] = "orphan" }},
-		{"bad base64", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS; f["prompt_audio"] = "%%%" }},
-		{"bad URL scheme", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS; f["prompt_audio"] = "file:///etc/passwd" }},
+		{"legacy prompt base64", func(f map[string]string) { f["task"] = runpod.AuKTaskZeroShotTTS; f["prompt_audio"] = "YQ==" }},
+		{"legacy prompt URL", func(f map[string]string) {
+			f["task"] = runpod.AuKTaskZeroShotTTS
+			f["prompt_audio"] = "https://example.test/ref.wav"
+		}},
 		{"bad task", func(f map[string]string) { f["task"] = "weave" }},
 		{"flash nfe", func(f map[string]string) { f["nfe"] = "9" }},
-		{"base nfe", func(f map[string]string) { f["model_variant"] = runpod.AuKVariantBase; f["nfe"] = "15"; f["cfg_scale"] = "2" }},
-		{"base cfg", func(f map[string]string) { f["model_variant"] = runpod.AuKVariantBase; f["nfe"] = "32"; f["cfg_scale"] = "6" }},
+		{"base nfe", func(f map[string]string) {
+			f["model_variant"] = runpod.AuKVariantBase
+			f["nfe"] = "15"
+			f["cfg_scale"] = "2"
+		}},
+		{"base cfg", func(f map[string]string) {
+			f["model_variant"] = runpod.AuKVariantBase
+			f["nfe"] = "32"
+			f["cfg_scale"] = "6"
+		}},
 		{"duration", func(f map[string]string) { f["gen_seconds"] = "301" }},
 		{"delivery", func(f map[string]string) { f["response_delivery"] = "mail" }},
 	}
@@ -1065,17 +1138,90 @@ func TestCreateJobAuKUploadPersistsPrivately(t *testing.T) {
 	}
 }
 
-func TestCreateJobAuKRejectsUploadAndDirectValueTogether(t *testing.T) {
+func TestCreateJobAuKSelectedRenderIsCopiedPrivately(t *testing.T) {
 	srv := newTestServer(t)
 	cookie := login(t, srv)
+	stockID := firstVoiceID(t, srv, cookie)
+	source := createReadyRender(t, srv, 1, stockID, []byte("RIFF-render-source"))
 	fields := baseAuKFields(runpod.AuKTaskContentEdit)
-	fields["audio"] = "YQ=="
-	rec := postMultipartJob(t, srv, cookie, fields, map[string][]byte{"audio_file": []byte("RIFFtest")})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	fields["source_job_id"] = strconv.FormatInt(source.ID, 10)
+	rec := postMultipartJob(t, srv, cookie, fields, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%q", rec.Code, rec.Body.String())
+	}
+	var job jobs.Job
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	params := job.Params()
+	if params["source_job_id"] != float64(source.ID) {
+		t.Fatalf("source provenance = %#v", params)
+	}
+	copied, ok := params["audio_path"].(string)
+	if !ok || copied == source.AudioPath {
+		t.Fatalf("source was not copied privately: %#v", params)
+	}
+	data, err := os.ReadFile(copied)
+	if err != nil || string(data) != "RIFF-render-source" {
+		t.Fatalf("copied source = %q, err=%v", data, err)
 	}
 }
 
+func TestCreateJobAuKRejectsInvalidSourceSelections(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := login(t, srv)
+	stockID := firstVoiceID(t, srv, cookie)
+	ready := createReadyRender(t, srv, 1, stockID, []byte("RIFF-ready"))
+	queuedID, err := srv.jobs.Enqueue(context.Background(), jobs.NewJob{
+		UserID: 1, VoiceID: stockID, Text: "not ready", Model: jobs.DefaultModel,
+	})
+	if err != nil {
+		t.Fatalf("enqueue pending source: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		fields map[string]string
+		files  map[string][]byte
+	}{
+		{"missing render", map[string]string{"source_job_id": "999999"}, nil},
+		{"render not ready", map[string]string{"source_job_id": strconv.FormatInt(queuedID, 10)}, nil},
+		{"upload and render", map[string]string{"source_job_id": strconv.FormatInt(ready.ID, 10)}, map[string][]byte{"audio_file": []byte("RIFF-upload")}},
+		{"legacy direct source", map[string]string{"audio": "YQ=="}, nil},
+		{"legacy prompt upload", nil, map[string][]byte{"prompt_audio_file": []byte("RIFF-prompt")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := baseAuKFields(runpod.AuKTaskContentEdit)
+			for key, value := range tc.fields {
+				fields[key] = value
+			}
+			rec := postMultipartJob(t, srv, cookie, fields, tc.files)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateJobAuKRejectsAnotherUsersRender(t *testing.T) {
+	srv := newTestServer(t)
+	ownerCookie := signInAs(t, srv, "source_owner", auth.StatusApproved)
+	otherCookie := signInAs(t, srv, "source_other", auth.StatusApproved)
+	ownerID := userIDByName(t, srv, "source_owner")
+	stockID := firstVoiceID(t, srv, ownerCookie)
+	source := createReadyRender(t, srv, ownerID, stockID, []byte("RIFF-private"))
+
+	fields := baseAuKFields(runpod.AuKTaskContentEdit)
+	fields["source_job_id"] = strconv.FormatInt(source.ID, 10)
+	rec := postMultipartJob(t, srv, otherCookie, fields, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 without revealing the foreign render (body %q)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "RIFF-private") {
+		t.Fatal("foreign render bytes leaked in the rejection")
+	}
+}
 
 func TestCreateJobAuKURLEncodedWithoutFiles(t *testing.T) {
 	srv := newTestServer(t)
@@ -1084,6 +1230,7 @@ func TestCreateJobAuKURLEncodedWithoutFiles(t *testing.T) {
 		"model": {jobs.AuKModel}, "task": {runpod.AuKTaskInstructTTS},
 		"instruction": {"urlencoded api request"}, "model_variant": {runpod.AuKVariantFlash},
 		"nfe": {"4"}, "cfg_scale": {"0"}, "response_delivery": {runpod.AuKDeliveryBase64},
+		"gen_seconds": {"6"},
 	}
 	rec := postJob(t, srv, cookie, form, "application/json")
 	if rec.Code != http.StatusOK {

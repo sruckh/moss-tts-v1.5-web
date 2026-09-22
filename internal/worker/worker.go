@@ -59,6 +59,7 @@ type JobStore interface {
 type ReferenceStore interface {
 	Reference(ctx context.Context, id int64) (data []byte, format string, err error)
 	Get(ctx context.Context, id int64) (voices.Voice, error)
+	PendingTranscriptionIDs(ctx context.Context, limit int) ([]int64, error)
 	SetReferenceTranscript(ctx context.Context, id int64, transcript string) error
 }
 
@@ -349,7 +350,8 @@ type Worker struct {
 	log         *slog.Logger
 	maxInFlight int
 	interval    time.Duration
-	maxAttempts int
+	maxAttempts             int
+	proactiveTranscription bool
 
 	leaseMu sync.Mutex
 	leases  map[int64]*transcriptionLease
@@ -415,6 +417,12 @@ func WithWhisperClient(c WhisperTranscriber) Option {
 	}
 }
 
+// WithProactiveTranscription makes the worker scan durable voice state after
+// each tick so uploads are transcribed even when no Higgs/Breeze job uses them.
+func WithProactiveTranscription(enabled bool) Option {
+	return func(w *Worker) { w.proactiveTranscription = enabled }
+}
+
 // New builds a Worker. maxInFlight caps how many jobs may sit at RunPod at once.
 func New(jobStore JobStore, referenceStore ReferenceStore, client Submitter,
 	maxInFlight int, log *slog.Logger, opts ...Option) *Worker {
@@ -466,6 +474,12 @@ func (w *Worker) Run(ctx context.Context) {
 // single goroutine and submits sequentially, so two ticks can never race to
 // submit the same row.
 func (w *Worker) Tick(ctx context.Context) {
+	// Proactive transcription runs after queue submission work and also on every
+	// early return, so full RunPod capacity never strands newly uploaded voices.
+	if w.proactiveTranscription {
+		defer w.transcribePendingVoice(ctx)
+	}
+
 	inFlight, err := w.jobs.InFlight(ctx)
 	if err != nil {
 		w.log.Error("worker: count in-flight", "err", err)
@@ -790,7 +804,6 @@ func (w *Worker) buildBreezeInput(ctx context.Context, job jobs.Job) (runpod.Bre
 	}
 }
 
-
 func (w *Worker) buildAuKInput(job jobs.Job) (runpod.AuKInput, error) {
 	params := job.Params()
 	audio, err := loadAuKAudio(params, "audio", "audio_path")
@@ -807,7 +820,6 @@ func (w *Worker) buildAuKInput(job jobs.Job) (runpod.AuKInput, error) {
 		Audio:            audio,
 		PromptAudio:      promptAudio,
 		PromptText:       breezeParamString(params, "prompt_text"),
-		GenText:          breezeParamString(params, "gen_text"),
 		ModelVariant:     breezeParamString(params, "model_variant"),
 		ResponseDelivery: breezeParamString(params, "response_delivery"),
 	}
@@ -860,6 +872,12 @@ func (w *Worker) ensureTranscript(ctx context.Context, job jobs.Job) error {
 	if job.Model == "" || job.Model == jobs.DefaultModel {
 		return nil // MOSS bypass
 	}
+	if job.IsAuK() {
+		// AuK prompt audio is copied into the job at enqueue time and prompt_text
+		// is optional. Retaining voice_id attributes the take to its source card;
+		// it must not turn AuK into a Higgs/Breeze transcription dependency.
+		return nil
+	}
 	// Breeze design mode renders from an instruction alone. It has no reference
 	// voice to transcribe, so it leaves the gate the same way MOSS does — a new
 	// reason, not a new mechanism. Checked before VoiceID so a design job that
@@ -897,7 +915,36 @@ func (w *Worker) transcribeVoice(ctx context.Context, voiceID int64) error {
 	if !w.claimTranscription(voiceID) {
 		return fmt.Errorf("reference audio transcription for voice %d is not available yet (retry pending)", voiceID)
 	}
+	return w.transcribeClaimedVoice(ctx, voiceID)
+}
 
+// transcribePendingVoice makes at most one Whisper request per worker tick.
+// Leased/backing-off IDs are skipped so one bad clip cannot starve later uploads.
+func (w *Worker) transcribePendingVoice(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	ids, err := w.voices.PendingTranscriptionIDs(ctx, 20)
+	if err != nil {
+		w.log.Error("worker: list pending voice transcriptions", "err", err)
+		return
+	}
+	for _, voiceID := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		if !w.claimTranscription(voiceID) {
+			continue
+		}
+		w.log.Info("proactive transcription triggered", "voice_id", voiceID)
+		if err := w.transcribeClaimedVoice(ctx, voiceID); err != nil {
+			w.log.Warn("proactive transcription failed", "voice_id", voiceID, "err", err)
+		}
+		return
+	}
+}
+
+func (w *Worker) transcribeClaimedVoice(ctx context.Context, voiceID int64) error {
 	data, format, err := w.voices.Reference(ctx, voiceID)
 	if err != nil {
 		return fmt.Errorf("reference audio transcription failed: %w", err)

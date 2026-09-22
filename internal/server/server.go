@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/sruckh/timbre/internal/assistant"
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/jobs"
@@ -25,30 +26,35 @@ import (
 
 // Server holds the dependencies shared by every handler.
 type Server struct {
-	cfg    config.Config
-	db     *sql.DB
-	auth   *auth.Manager
-	access *auth.AccessRequests
-	voices *voices.Store
-	jobs   *jobs.Store
-	runpod *runpod.Client
-	router chi.Router
+	cfg       config.Config
+	db        *sql.DB
+	auth      *auth.Manager
+	access    *auth.AccessRequests
+	voices    *voices.Store
+	jobs      *jobs.Store
+	runpod    *runpod.Client
+	assistant *assistant.Client
+	router    chi.Router
 }
 
 // New builds the router. runpodClient is used only to probe /health here — job
 // submission itself belongs to the background worker, never to a request.
+// assistantClient answers POST /jobs/auk-assistant directly from the request
+// (unlike RunPod, a chat completion is fast enough to stay synchronous).
 func New(cfg config.Config, database *sql.DB, authManager *auth.Manager,
-	voiceStore *voices.Store, jobStore *jobs.Store, runpodClient *runpod.Client) *Server {
+	voiceStore *voices.Store, jobStore *jobs.Store, runpodClient *runpod.Client,
+	assistantClient *assistant.Client) *Server {
 
 	srv := &Server{
-		cfg:    cfg,
-		db:     database,
-		auth:   authManager,
-		access: auth.NewAccessRequests(database),
-		voices: voiceStore,
-		jobs:   jobStore,
-		runpod: runpodClient,
-		router: chi.NewRouter(),
+		cfg:       cfg,
+		db:        database,
+		auth:      authManager,
+		access:    auth.NewAccessRequests(database),
+		voices:    voiceStore,
+		jobs:      jobStore,
+		runpod:    runpodClient,
+		assistant: assistantClient,
+		router:    chi.NewRouter(),
 	}
 	srv.routes()
 	return srv
@@ -102,10 +108,13 @@ func (s *Server) routes() {
 		r.Post("/voices/{id}/global", s.handleAdminVoiceGlobal)
 		r.Post("/voices/{id}/owner", s.handleAdminVoiceOwner)
 		r.Post("/voices/{id}/unassign", s.handleAdminVoiceUnassign)
+		r.Delete("/voices/{id}", s.handleAdminVoiceDelete)
 	})
 	s.router.Get("/voices", s.handleVoiceLibrary)
+	s.router.Get("/voices/grid", s.handleVoiceGrid)
 	s.router.Post("/voices/upload", s.handleVoiceUpload)
 	s.router.Post("/voices/{id}/name", s.handleVoiceRename)
+	s.router.Delete("/voices/{id}", s.handleVoiceDelete)
 	// Session-gated preview of a stored reference clip. It is not a public URL
 	// and RunPod never sees it: submission still carries the bytes base64-inline.
 	s.router.Get("/voices/{id}/reference", s.handleVoiceReference)
@@ -113,6 +122,9 @@ func (s *Server) routes() {
 	s.router.Get("/jobs/queue", s.handleQueue)
 	s.router.Get("/jobs", s.handleQueue)
 	s.router.Post("/jobs", s.handleCreateJob)
+	// Synchronous, unlike every RunPod route above: a chat completion answers
+	// in seconds, so this is a plain request/response, no worker/poller.
+	s.router.Post("/jobs/auk-assistant", s.handleAuKAssistant)
 	s.router.Get("/jobs/{id}/audio", s.handleDownloadAudio)
 	s.router.Get("/jobs/{id}/player", s.handleJobPlayer)
 	s.router.Delete("/jobs/{id}", s.handleDeleteJob)

@@ -140,7 +140,6 @@ func TestLoadBreezeEndpointDefaultsEmpty(t *testing.T) {
 	}
 }
 
-
 func TestLoadAuKEndpoint(t *testing.T) {
 	t.Setenv(RunPodEndpointEnv, "https://api.runpod.ai/v2/moss-id")
 	t.Setenv(HiggsRunPodEndpointEnv, "https://api.runpod.ai/v2/higgs-id")
@@ -166,5 +165,53 @@ func TestLoadAuKEndpointDefaultsEmpty(t *testing.T) {
 	}
 	if cfg.AuKRunPodEndpoint != "" {
 		t.Fatalf("AuKRunPodEndpoint = %q, want empty", cfg.AuKRunPodEndpoint)
+	}
+}
+
+func TestLoadLLMConfig(t *testing.T) {
+	t.Setenv(LLMBaseURLEnv, "https://api.example.test/v1/")
+	t.Setenv(LLMAPIKeyEnv, "sk-test")
+	t.Setenv(LLMModelIDEnv, "gpt-test")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LLMBaseURL != "https://api.example.test/v1" {
+		t.Fatalf("LLMBaseURL = %q, want the trailing slash trimmed", cfg.LLMBaseURL)
+	}
+	if cfg.LLMAPIKey != "sk-test" || cfg.LLMModelID != "gpt-test" {
+		t.Fatalf("LLMAPIKey/LLMModelID = %q/%q", cfg.LLMAPIKey, cfg.LLMModelID)
+	}
+	if !cfg.LLMConfigured() {
+		t.Fatal("LLMConfigured() = false with all three values set")
+	}
+}
+
+func TestLoadLLMConfigDefaultsEmpty(t *testing.T) {
+	t.Setenv(LLMBaseURLEnv, "")
+	t.Setenv(LLMAPIKeyEnv, "")
+	t.Setenv(LLMModelIDEnv, "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.LLMBaseURL != "" || cfg.LLMAPIKey != "" || cfg.LLMModelID != "" {
+		t.Fatalf("LLM config = %+v, want all empty", cfg)
+	}
+	if cfg.LLMConfigured() {
+		t.Fatal("LLMConfigured() = true with nothing set")
+	}
+}
+
+func TestLLMConfiguredRequiresAllThree(t *testing.T) {
+	cases := []Config{
+		{LLMAPIKey: "k", LLMModelID: "m"},
+		{LLMBaseURL: "https://x", LLMModelID: "m"},
+		{LLMBaseURL: "https://x", LLMAPIKey: "k"},
+	}
+	for _, cfg := range cases {
+		if cfg.LLMConfigured() {
+			t.Errorf("LLMConfigured() = true for partial config %+v", cfg)
+		}
 	}
 }

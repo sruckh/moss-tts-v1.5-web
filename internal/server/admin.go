@@ -410,6 +410,20 @@ func (s *Server) handleAdminVoiceUnassign(w http.ResponseWriter, r *http.Request
 	s.adminActionDone(w, r)
 }
 
+func (s *Server) handleAdminVoiceDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := adminRouteID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	actorID, _ := s.auth.UserID(r)
+	if err := s.deleteVoice(r, id, actorID, true); err != nil {
+		s.writeVoiceDeleteError(w, r, err)
+		return
+	}
+	s.adminActionDone(w, r)
+}
+
 func (s *Server) adminError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, errAdminUserNotFound), errors.Is(err, auth.ErrNoSuchRequest), errors.Is(err, voices.ErrNotFound):
@@ -575,7 +589,11 @@ func (s *Server) deleteAdminUser(ctx context.Context, userID int64) ([]string, e
 	// user who no longer exists is access nobody can audit. The FK would cascade
 	// this anyway; doing it here means the invariant does not depend on the
 	// foreign_keys pragma being on.
-	if _, err := tx.ExecContext(ctx, "UPDATE voices SET owner_id = NULL WHERE owner_id = ?", userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE voices
+		SET owner_id = CASE WHEN owner_id = ? THEN NULL ELSE owner_id END,
+			creator_id = CASE WHEN creator_id = ? THEN NULL ELSE creator_id END
+		WHERE owner_id = ? OR creator_id = ?`, userID, userID, userID, userID); err != nil {
 		return nil, fmt.Errorf("delete user: voices: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM voice_assignments WHERE user_id = ?", userID); err != nil {

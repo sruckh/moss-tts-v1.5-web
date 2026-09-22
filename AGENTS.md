@@ -80,12 +80,53 @@ reference, rendered in itself.
   `paralinguistic_edit`, `enhancement`, `separation`) under the documented
   task/audio matrix, with `flash` (NFE accepts 1..8 but executes 4, CFG forced
   0) and `base` (NFE 16..64, CFG 1..5) variants, `gen_seconds` 0.5..300 and
-  `auto|s3|base64` delivery. AuK jobs enqueue with `voice_id` SQL NULL; their
-  source/prompt audio is an HTTP(S) URL in `params_json` or a private upload
-  under `TIMBRE_AUDIO_DIR/inputs/user_<id>/` (15 MB decoded cap, multipart
-  `audio_file`/`prompt_audio_file` or urlencoded `audio`/`prompt_audio`
-  base64) — the worker base64-encodes the private file exactly once at
-  submit and deletes it after `MarkSubmitted` (kept while submission retries
+  `auto|s3|base64` delivery. AuK zero-TTS and Auto-with-clone jobs retain the
+  selected cloned card's `voice_id`; Timbre authorization-checks that card and
+  copies its stored reference into a private job-owned `prompt_audio_path`.
+  `zero_shot_tts` and `instruct_tts` additionally *require* `gen_seconds`
+  (`ValidateAuKInput`; the UI shows a required-field warning until one is
+  set). Both tasks have no audio whose length the worker can measure — for
+  zero-shot the "audio" is the voice reference clip, not the target phrase,
+  and the worker's own fallback ("intentionally preserves the source
+  duration") makes it silently match the reference clip's length; for
+  instruct_tts there is no audio at all, so it falls back to a flat few
+  seconds regardless of content length. Both have been observed producing
+  wrong-length or wrong-content output, confirmed against
+  `sruckh/tencent-auk`'s `engine.py` and the official `Tencent-Hunyuan/AuK`
+  cookbook, which always pairs these tasks' `--instruction` with an explicit
+  `--gen_seconds`. There is no `gen_text` field — the worker's own
+  duration-from-text heuristic proved unreliable in practice (too fast: a
+  phrase whose heuristic estimate was ~2s needed ~4s to render correctly).
+  Instead, the studio auto-fills `gen_seconds` locally from whatever target
+  text the task is driven by (roughly 1 second per 10 non-whitespace
+  characters), fully editable/overridable once the user touches the
+  Generation seconds field directly. For `instruct_tts`/`auto` this text
+  comes from the standalone "Target text (for duration estimate)" field — a
+  client-only value (no `name` attribute, never submitted) that exists only
+  to drive this estimate, alongside the manually-typed Instruction field.
+  For `zero_shot_tts` specifically the UI drops the free-form Instruction
+  field entirely: the user only ever types "Text to speak", and a hidden
+  `instruction` input reactively composes AuK's exact canonical wrapper
+  (`Say the following with the same voice: "<text>"`, matching the official
+  cookbook) and submits that — one text field does double duty as both the
+  duration-estimate source and the literal spoken content, since for this
+  task they are the same string. The AI prompt assistant's "Insert into
+  instruction" bypasses this auto-composition (it sets the full instruction
+  and marks it user-touched) but still extracts the trailing quoted target
+  phrase from its reply into the text field, so the duration estimate stays
+  correct either way. The reference card's stored transcript is never
+  auto-sent as `prompt_text` (the worker has no dedicated transcript
+  parameter and instead concatenates it onto the instruction text, which can
+  also skew output) — the form exposes it only as an explicit, opt-in
+  override field.
+  Stock cards have no reference: explicit zero-shot rejects them, while Auto
+  falls back to instruction TTS. Edit/enhance/separation tasks take exactly one
+  source: multipart `audio_file` or the user's selected ready render
+  (`source_job_id`). Render bytes are ownership/status/15 MB checked and copied
+  under `TIMBRE_AUDIO_DIR/inputs/user_<id>/`, so deleting the original take
+  cannot break the queued job. Browser-facing URL/base64 prompt and source
+  fields are rejected. The worker base64-encodes each private file exactly once
+  at submit and deletes it after `MarkSubmitted` (kept while submission retries
   transiently; removed on job delete and user deletion via `Job.InputPaths`).
   The poller accepts inline `audio_base64` or presigned `audio_url` (bounded
   64 MiB download) and runs Whisper alignment only on AuK TTS tasks —
@@ -99,14 +140,50 @@ reference, rendered in itself.
   and returns the same fragment. **Rename is clones-only** — `SeedStock`
   reconciles stock rows *by name*, so a renamed stock row would read as stale on
   the next boot and be deleted, taking every job's voice link with it
-  (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead. All
-  routes are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
+  (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead.
+  `DELETE /voices/{id}` is also clones-only: the stable `creator_id` (the
+  original uploader) or a live administrator may delete, while an assignee may
+  not. It deletes the row and all access grants, nulls historical
+  `jobs.voice_id`, removes the reference blob after the transaction commits,
+  and returns the refreshed grid so the card disappears immediately. All routes
+  are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
   `Store.ReferenceBytes` reads the blob back for inline base64 submission.
   Cloned cards report transcription readiness from `ReferenceTranscript`:
   non-blank stored text is **Ready**, otherwise **Transcribing...**. Upload and
-  enqueue responses never wait for Whisper; the background worker owns eager and
-  atomic lazy recovery before a Higgs job reaches RunPod. MOSS jobs bypass this
-  transcript gate entirely.
+  enqueue responses never wait for Whisper. After each submission-worker tick,
+  a proactive pass finds durable NULL/blank cloned transcripts and attempts one
+  with the existing lease/backoff rules; this also backfills uploads created
+  before the behavior existed, including cards used only by AuK. Higgs/Breeze
+  submission retains atomic lazy recovery when it reaches a clone first. A
+  pending `VoiceGrid` polls `/voices/grid` every three seconds and stops as soon
+  as all visible cards are ready, so the badge repaints without a page reload.
+  MOSS and AuK jobs themselves bypass the transcript gate entirely.
+- **The AuK prompt assistant is a synchronous, unpersisted LLM proxy scoped to
+  one fixed system prompt.** `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_ID`
+  are Infisical secrets exactly like `RUNPOD_API_KEY` — no docker-compose.yml
+  entry, injected straight into the app process by `infisical run`.
+  `internal/assistant.Client` calls one OpenAI-compatible
+  `{base_url}/chat/completions` endpoint; `Client.Configured` reports whether
+  all three are set. `POST /jobs/auk-assistant` (session-gated, registered
+  next to the other `/jobs/*` routes) is a plain request/response — a chat
+  completion finishes in seconds, so unlike every RunPod route there is no
+  worker/poller here and it stays well under Cloudflare's ~90s cap. The
+  browser posts the running conversation (`{"messages":[{"role","content"}]}`,
+  ≤40 turns, ≤4000 characters each); the server always prepends the fixed
+  `assistant.SystemPrompt` and never accepts one from the client. A malformed
+  request is `400` regardless of configuration; a well-formed one against an
+  unconfigured assistant is `503`; an upstream failure is a generic `500` (the
+  key never reaches the error body). Nothing about the conversation is written
+  to the database — it lives only in the compose form's Alpine state
+  (`aukAssistant()` in `studioHelpers`, `internal/web/studio.templ`) for the
+  life of the page. The assistant's canonical
+  `TASK:`/`INSTRUCTION:`/`REQUIRED AUDIO INPUT:`/`NOTES:` reply never
+  overwrites the instruction field on its own — the panel renders an explicit
+  **"Insert into instruction"** button (parsed client-side from the quoted
+  `INSTRUCTION:` line) that dispatches `timbre-assistant-apply`, which the
+  compose form's top-level `x-data` scope listens for, the same cross-scope
+  pattern `timbre-source-selected` uses (`internal/web/jobs.templ`).
+
 - **No request blocks longer than ~90s** (Cloudflare's cap). The browser talks
   only to this app; the minutes-long RunPod render happens out-of-band in a
   background worker and the UI polls. The browser never calls RunPod.
@@ -143,9 +220,10 @@ reference, rendered in itself.
   applicants could both pass.
 - **The schema is multi-user-aware, and migrations stay additive.** `users`
   carries `role` (`admin|user`) and `status` (`approved|pending|disabled`,
-  defaulting to `pending`) plus an optional `email`; `voices` keeps the nullable
-  `owner_id` column for schema compatibility and carries `is_global`, but access
-  no longer comes from `owner_id`. `voice_assignments(voice_id, user_id)` is the
+  defaulting to `pending`) plus an optional `email`; `voices` keeps nullable
+  `owner_id` as the most-recent-grant compatibility mirror, adds stable
+  `creator_id` for original-uploader delete authority, and carries `is_global`.
+  Access comes from neither owner field. `voice_assignments(voice_id, user_id)` is the
   many-to-many access source, unique per pair with cascading foreign keys;
   visibility is `is_global = 1 OR voice_assignments.user_id = ?` and list queries
   use `DISTINCT` so a global assigned card appears once. `access_requests` holds
@@ -170,7 +248,8 @@ reference, rendered in itself.
   voice rows with `owner_id=NULL`, and then deletes the account.
   Access-request decisions use `auth.AccessRequests`; voice actions use
   `voices.Store.SetGlobal`/`Assign`/`Unassign` (`/admin/voices/{id}/unassign`
-  revokes one user without disturbing the card's other assignments).
+  revokes one user without disturbing the card's other assignments) and
+  `/admin/voices/{id}` lets a live admin permanently delete a cloned card.
   **A private card's access is many-to-many, not single-owner** —
   `voice_assignments` can (and routinely does) hold several rows for the same
   card. `server.(*Server).adminVoices` reflects that: it joins

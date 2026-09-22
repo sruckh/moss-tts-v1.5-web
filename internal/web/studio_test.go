@@ -56,7 +56,7 @@ func sampleJobs() []jobs.Job {
 func sampleVoices() []voices.Voice {
 	return []voices.Voice{
 		{ID: 1, Kind: voices.KindStock, Name: "Moss", Model: "MOSS-TTS v1.5", LicenseLabel: "OpenMOSS Community"},
-		{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", LicenseLabel: "Cloned voice"},
+		{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", LicenseLabel: "Cloned voice", CanDelete: true},
 	}
 }
 
@@ -123,6 +123,22 @@ func TestQueueMarksSelectedRow(t *testing.T) {
 	}
 }
 
+func TestQueueRowsPublishReadySourceSelection(t *testing.T) {
+	html := render(t, Queue(sampleJobs(), 0, nil, 9))
+	ready := rowHTML(t, html, "job-9")
+	if !strings.Contains(ready, `data-source-ready="true"`) {
+		t.Errorf("ready row does not publish source readiness: %s", ready)
+	}
+	working := rowHTML(t, html, "job-8")
+	if !strings.Contains(working, `data-source-ready="false"`) {
+		t.Errorf("working row incorrectly advertises ready audio: %s", working)
+	}
+	page := render(t, Studio(sampleJobs(), sampleVoices(), nil, 9))
+	if !strings.Contains(page, `timbre-source-selected`) {
+		t.Error("studio helper does not publish selected queue rows to the compose form")
+	}
+}
+
 // The poll asks for the selected take by URL, so every swap re-renders the
 // highlight and the fragment that arrives asks for it again — the selection
 // sustains itself across a table that is replaced every two seconds.
@@ -183,7 +199,7 @@ func TestPlayerBodyStates(t *testing.T) {
 
 // Clearing the script is one control, not a select-all.
 func TestComposeHasClearScriptControl(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 
 	if !strings.Contains(html, "Clear script") {
 		t.Error("compose card has no clear-script control")
@@ -197,7 +213,7 @@ func TestComposeHasClearScriptControl(t *testing.T) {
 }
 
 func TestComposeEngineSelector(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 
 	for _, want := range []string{
 		`name="model"`,
@@ -243,6 +259,8 @@ func TestVoiceCardControls(t *testing.T) {
 		`hx-post="/voices/4/name"`,
 		`src="/voices/4/reference"`,
 		`aria-label="Rename Marrow"`,
+		`hx-delete="/voices/4"`,
+		`aria-label="Delete Marrow"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("cloned card missing %q", want)
@@ -254,9 +272,42 @@ func TestVoiceCardControls(t *testing.T) {
 	if strings.Contains(html, `src="/voices/1/reference"`) {
 		t.Error("stock card offers a reference preview it does not have")
 	}
+	if strings.Contains(html, `hx-delete="/voices/1"`) {
+		t.Error("stock card offers deletion")
+	}
+	withoutAuthority := []voices.Voice{{ID: 5, Kind: voices.KindCloned, Name: "Shared", Model: "Cloned"}}
+	if got := render(t, VoiceGrid(withoutAuthority, 5)); strings.Contains(got, `hx-delete="/voices/5"`) {
+		t.Error("assigned non-owner card offers deletion")
+	}
 	// A card holds buttons now, so it may not be one itself.
 	if strings.Contains(html, `<button type="button" aria-pressed=`) {
 		t.Error("the voice card is still a button and now nests buttons")
+	}
+}
+
+func TestVoiceGridSwapReconcilesDeletedSelection(t *testing.T) {
+	html := render(t, Studio(sampleJobs(), sampleVoices(), nil, 0))
+	for _, want := range []string{
+		"function timbrePaintVoice()",
+		"cards.find(function (card) { return card.dataset.voiceId === vid.value; })",
+		"timbrePaintVoice();",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("studio selection reconciliation missing %q", want)
+		}
+	}
+}
+
+func TestAdminVoiceDeleteControlIsClonedOnly(t *testing.T) {
+	html := render(t, AdminPanel(AdminData{Voices: []AdminVoice{
+		{ID: 1, Kind: voices.KindStock, Name: "Moss"},
+		{ID: 2, Kind: voices.KindCloned, Name: "Disposable"},
+	}}))
+	if !strings.Contains(html, `hx-delete="/admin/voices/2"`) {
+		t.Error("admin clone row is missing delete control")
+	}
+	if strings.Contains(html, `hx-delete="/admin/voices/1"`) {
+		t.Error("admin stock row offers deletion")
 	}
 }
 
@@ -274,6 +325,16 @@ func TestVoiceCardTranscriptionReadiness(t *testing.T) {
 	}
 	if got := strings.Count(html, ">Ready</span>"); got != 1 {
 		t.Errorf("Ready transcription badge count = %d, want 1", got)
+	}
+	for _, want := range []string{`hx-get="/voices/grid"`, `hx-trigger="every 3s"`, `hx-swap="outerHTML show:none"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("pending grid missing %q", want)
+		}
+	}
+
+	readyHTML := render(t, VoiceGrid([]voices.Voice{items[0], items[3]}, 4))
+	if strings.Contains(readyHTML, `hx-get="/voices/grid"`) {
+		t.Error("fully ready grid keeps polling")
 	}
 	if !strings.Contains(html, "focus:ring-2") {
 		t.Error("voice cards lost their keyboard focus ring")
@@ -385,36 +446,119 @@ func TestVoiceGridContainerIsScrollableWithMaxHeight(t *testing.T) {
 	}
 }
 
-
 func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, sampleJobs()[0]))
 	for _, want := range []string{
 		`enctype="multipart/form-data"`, `value="tencent/AuK"`,
 		`name="instruction"`, `name="task"`, `value="auto"`,
 		`value="zero_shot_tts"`, `value="instruct_tts"`,
 		`value="content_edit"`, `value="acoustic_edit"`,
 		`value="paralinguistic_edit"`, `value="enhancement"`, `value="separation"`,
-		`name="audio_file"`, `name="audio"`, `name="prompt_audio_file"`,
-		`name="prompt_audio"`, `name="prompt_text"`, `name="gen_seconds"`,
-		`name="gen_text"`, `name="model_variant"`, `value="flash"`, `value="base"`,
-		`name="nfe"`, `name="cfg_scale"`, `name="seed"`,
-		`name="response_delivery"`, `value="s3"`, `value="base64"`,
+		`name="audio_source"`, `value="upload"`, `value="render"`,
+		`name="audio_file"`, `name="source_job_id"`, `name="prompt_text"`,
+		`selected cloned voice card`, `Use selected render`, `Take 9`,
+		`name="gen_seconds"`, `id="auk_text_hint"`, `name="model_variant"`,
+		`value="flash"`, `value="base"`, `name="nfe"`, `name="cfg_scale"`,
+		`name="seed"`, `name="response_delivery"`, `value="s3"`, `value="base64"`,
 		`decoded limit 15 MB`, `Run AuK task`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("AuK compose contract missing %q", want)
 		}
 	}
+	for _, forbidden := range []string{`name="audio"`, `name="prompt_audio"`, `name="prompt_audio_file"`, `name="gen_text"`} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("AuK compose contract still exposes %q", forbidden)
+		}
+	}
+}
+
+func TestComposeExposesAuKPromptAssistant(t *testing.T) {
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
+	for _, want := range []string{
+		`x-data="aukAssistant()"`,
+		`Ask the AI prompt assistant`,
+		`Ask assistant`,
+		`Clear conversation`,
+		`Insert into instruction`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("AuK assistant panel missing %q", want)
+		}
+	}
+	// The parent form must listen for the assistant's apply event and route
+	// it into both the instruction field and the Mode selector — a reply
+	// whose instruction says "using the reference voice provided" is useless
+	// if the task stays on whatever the form defaulted to (see regression:
+	// an inserted zero-shot instruction under instruct_tts sends AuK no
+	// reference audio at all, since instruct_tts forbids it outright).
+	if !strings.Contains(html, `x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; aukInstructionTouched = true; if ($event.detail.task) { aukTask = $event.detail.task }; if ($event.detail.text) { aukTextHint = $event.detail.text; genSecondsTouched = false }"`) {
+		t.Error("compose form does not wire the assistant's apply event into aukInstruction, aukTask and aukTextHint")
+	}
+	if !strings.Contains(html, `@click="apply(m.instruction, m.task)"`) {
+		t.Error("insert-into-instruction button does not forward the parsed task alongside the instruction")
+	}
+
+	// The fetch target, the aukAssistant() factory and its task parser all
+	// live in the shared studioHelpers script, rendered once per page
+	// alongside Compose rather than inside it — same split as
+	// timbre-source-selected.
+	page := render(t, Studio(sampleJobs(), sampleVoices(), nil, 9))
+	for _, want := range []string{
+		`window.aukAssistant`, `/jobs/auk-assistant`, `timbre-assistant-apply`,
+		`parseTask:`, `zero_shot_tts`, `instruct_tts`, `content_edit`,
+		`acoustic_edit`, `paralinguistic_edit`, `separation`, `enhancement`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("studioHelpers script missing %q", want)
+		}
+	}
+
+	// Regression history, each confirmed against a real reply that broke
+	// the prior approach:
+	//   1. A naive [^"]* character class truncates on the first quote,
+	//      escaped or not, inside the instruction's own quoted phrase
+	//      (say: "...").
+	//   2. Bounding the capture by "the next known field, or a closing
+	//      fence, or end of text" over-captures into free-form follow-up
+	//      prose whenever a reply breaks format and omits those later
+	//      fields (e.g. a mixed "here's the block, but I still need X"
+	//      reply) — that garbled, self-contradictory text is what actually
+	//      got submitted to AuK and is the likely reason it echoed the
+	//      reference clip instead of the target phrase.
+	// The fix must bound the value to its own single line — the fixed
+	// format never wraps INSTRUCTION across lines — and must strip
+	// delimiters only from the exact first/last character, never by
+	// hunting for a "matching" quote inside the value.
+	if strings.Contains(page, `/INSTRUCTION:\s*"([^"]*)"/`) {
+		t.Error("parseInstruction regressed to the naive pattern that truncates on any quote")
+	}
+	if strings.Contains(page, `(?:\\.|[^"\\])*`) {
+		t.Error("parseInstruction regressed to character-class quote-matching, which cannot survive an unescaped inner quote")
+	}
+	if strings.Contains(page, `(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:|`+"`"+"`"+"`"+`|\$\)/`) {
+		t.Error("parseInstruction regressed to bounding by a later field/fence/end-of-text, which over-captures trailing prose when a reply omits them")
+	}
+	if !strings.Contains(page, `/INSTRUCTION:\s*(.+)/`) {
+		t.Error("parseInstruction does not bound the INSTRUCTION value to its own single line")
+	}
+	if !strings.Contains(page, `pairs = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019']]`) {
+		t.Error("parseInstruction does not strip a known delimiter pair from exactly the first/last character")
+	}
+	if !strings.Contains(page, `.replace(/\\(["\\nrt])/g`) {
+		t.Error("parseInstruction does not unescape backslash sequences a properly-escaped reply may still carry")
+	}
 }
 
 func TestComposeDisablesEngineSpecificFields(t *testing.T) {
-	html := render(t, Compose(sampleVoices(), 1))
+	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
 	for _, want := range []string{
-		`x-bind:disabled="!isAuK || !aukNeedsSource"`,
-		`x-bind:disabled="!isAuK || !aukAllowsPrompt"`,
+		`x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'upload'"`,
+		`x-bind:disabled="!isAuK || !aukNeedsSource || audioSource !== 'render' || !sourceTakeReady"`,
 		`x-bind:disabled="isAuK"`,
 		`x-bind:disabled="!isBreeze"`,
 		`x-bind:disabled="!needsVoice"`,
+		`x-bind:disabled="aukSourceMissing"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("conditional field contract missing %q", want)

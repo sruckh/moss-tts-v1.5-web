@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sruckh/timbre/internal/assistant"
 	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/db"
@@ -23,6 +24,14 @@ import (
 const testPassword = "correct horse battery staple"
 
 func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return newTestServerWithConfig(t, nil)
+}
+
+// newTestServerWithConfig is newTestServer with a hook to adjust cfg before
+// the server is built — e.g. pointing cfg.LLMBaseURL at an httptest.Server
+// double for the assistant tests. mutate may be nil.
+func newTestServerWithConfig(t *testing.T, mutate func(*config.Config)) *Server {
 	t.Helper()
 
 	handle, err := db.Open(filepath.Join(t.TempDir(), "timbre.db"))
@@ -47,15 +56,21 @@ func newTestServer(t *testing.T) *Server {
 		RunPodEndpoint: "https://api.runpod.ai/v2/test-endpoint",
 		AudioDir:       t.TempDir(),
 	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	voiceStore := voices.NewStore(handle, cfg.AudioDir)
 	if err := voiceStore.SeedStock(context.Background()); err != nil {
 		t.Fatalf("voices.SeedStock: %v", err)
 	}
 
 	// No API key: nothing in the server tests may reach RunPod, and the /health
-	// probe reports it as unconfigured rather than dialling out.
+	// probe reports it as unconfigured rather than dialling out. Likewise no
+	// LLM_* values by default, so the assistant reports itself unconfigured
+	// unless mutate sets them.
 	return New(cfg, handle, mgr, voiceStore, jobs.NewStore(handle),
-		runpod.New(cfg.RunPodEndpoint, ""))
+		runpod.New(cfg.RunPodEndpoint, ""),
+		assistant.New(cfg.LLMBaseURL, cfg.LLMAPIKey, cfg.LLMModelID))
 }
 
 // login posts valid credentials and returns the issued session cookie.

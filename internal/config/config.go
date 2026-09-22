@@ -30,7 +30,6 @@ const SecureCookiesEnv = "TIMBRE_SECURE_COOKIES"
 // a server-side value either way — the browser never calls RunPod directly.
 const RunPodEndpointEnv = "RUNPOD_ENDPOINT"
 
-
 // HiggsRunPodEndpointEnv names the variable holding the Higgs TTS
 // (bosonai/higgs-tts-3-4b) serverless endpoint, e.g.
 // https://api.runpod.ai/v2/<higgs-endpoint-id>. A second, separately
@@ -50,6 +49,18 @@ const BreezeRunPodEndpointEnv = "BREEZE_RUNPOD_ENDPOINT"
 // deployed separately from the three speech-only engines, but authenticates
 // with the same RUNPOD_API_KEY.
 const AuKRunPodEndpointEnv = "AUK_RUNPOD_ENDPOINT"
+
+// LLMBaseURLEnv, LLMAPIKeyEnv and LLMModelIDEnv name the variables that
+// configure the AuK prompt assistant's LLM backend. All three are Infisical
+// secrets, exactly like RUNPOD_API_KEY — nothing here is a compose-level
+// default, and there is no fallback base URL: an unconfigured assistant
+// stays off (Client.Configured reports false) rather than guessing a
+// provider.
+const (
+	LLMBaseURLEnv = "LLM_BASE_URL"
+	LLMAPIKeyEnv  = "LLM_API_KEY"
+	LLMModelIDEnv = "LLM_MODEL_ID"
+)
 
 // Config is the fully resolved runtime configuration.
 type Config struct {
@@ -89,6 +100,15 @@ type Config struct {
 	// is an approved project decision.
 	RunPodAPIKey string
 
+	// LLMBaseURL, LLMAPIKey and LLMModelID configure the AuK prompt
+	// assistant's OpenAI-compatible chat completions backend. All three are
+	// Infisical secrets and independent of RunPod's — a missing value simply
+	// leaves the assistant unconfigured (see assistant.Client.Configured);
+	// nothing about job submission depends on them.
+	LLMBaseURL string
+	LLMAPIKey  string
+	LLMModelID string
+
 	// AdminUsername and AdminPassword seed the first user on startup when the
 	// users table is empty (see internal/auth's Bootstrap). Injected by
 	// Infisical alongside RUNPOD_API_KEY.
@@ -118,6 +138,9 @@ func Load() (Config, error) {
 		AdminUsername:        os.Getenv("ADMIN_USERNAME"),
 		AdminPassword:        os.Getenv("ADMIN_PASSWORD"),
 		SessionSecret:        os.Getenv("TIMBRE_SESSION_SECRET"),
+		LLMBaseURL:           strings.TrimRight(os.Getenv(LLMBaseURLEnv), "/"),
+		LLMAPIKey:            os.Getenv(LLMAPIKeyEnv),
+		LLMModelID:           os.Getenv(LLMModelIDEnv),
 	}
 
 	maxInFlight, err := strconv.Atoi(env("TIMBRE_MAX_IN_FLIGHT", "2"))
@@ -134,6 +157,12 @@ func Load() (Config, error) {
 
 // HasRunPodKey reports whether the API key was injected, without exposing it.
 func (c Config) HasRunPodKey() bool { return c.RunPodAPIKey != "" }
+
+// LLMConfigured reports whether all three assistant secrets were injected,
+// without exposing any of them.
+func (c Config) LLMConfigured() bool {
+	return c.LLMBaseURL != "" && c.LLMAPIKey != "" && c.LLMModelID != ""
+}
 
 // SecureCookies reports whether session cookies should carry the Secure flag.
 // It is an explicit opt-in via TIMBRE_SECURE_COOKIES rather than inferred from

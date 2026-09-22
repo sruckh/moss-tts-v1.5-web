@@ -135,8 +135,8 @@ func (h *harness) worker(client Submitter, maxInFlight int, opts ...Option) *Wor
 // fakeSubmitter counts calls and records the payloads it was handed. The call
 // count is what proves a job is never submitted twice.
 type fakeSubmitter struct {
-	mu          sync.Mutex
-	calls       int
+	mu           sync.Mutex
+	calls        int
 	inputs       []runpod.Input
 	higgsInputs  []runpod.HiggsInput
 	breezeInputs []runpod.BreezeInput
@@ -165,7 +165,6 @@ func (f *fakeSubmitter) SubmitBreeze(_ context.Context, in runpod.BreezeInput) (
 	}
 	return runpod.Submission{ID: id, Status: status}, nil
 }
-
 
 func (f *fakeSubmitter) SubmitAuK(_ context.Context, in runpod.AuKInput) (runpod.Submission, error) {
 	f.mu.Lock()
@@ -897,6 +896,79 @@ func TestHiggsJobLazyRecoverySucceeds(t *testing.T) {
 	}
 }
 
+func TestProactiveTranscriptionRunsWithoutAJob(t *testing.T) {
+	h := newHarness(t)
+	whisper := &fakeWhisper{text: "  Automatically transcribed.  "}
+	w := h.worker(&fakeSubmitter{}, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+
+	w.Tick(context.Background())
+
+	voice, err := h.voices.Get(context.Background(), h.cloneID)
+	if err != nil {
+		t.Fatalf("Get voice: %v", err)
+	}
+	if !voice.ReferenceTranscript.Valid || voice.ReferenceTranscript.V != "Automatically transcribed." {
+		t.Fatalf("ReferenceTranscript = %+v, want proactive transcript", voice.ReferenceTranscript)
+	}
+	if whisper.callCount() != 1 {
+		t.Fatalf("whisper calls = %d, want 1", whisper.callCount())
+	}
+}
+
+func TestProactiveTranscriptionSkipsLeasedVoice(t *testing.T) {
+	h := newHarness(t)
+	secondID, err := h.voices.CreateCloned(context.Background(), h.userID, "Second", ".wav", []byte("DEF"))
+	if err != nil {
+		t.Fatalf("CreateCloned second: %v", err)
+	}
+	whisper := &fakeWhisper{text: "Second transcript."}
+	w := h.worker(&fakeSubmitter{}, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+	if !w.claimTranscription(h.cloneID) {
+		t.Fatal("failed to lease first pending voice")
+	}
+
+	w.Tick(context.Background())
+
+	first, err := h.voices.Get(context.Background(), h.cloneID)
+	if err != nil {
+		t.Fatalf("Get first: %v", err)
+	}
+	if first.ReferenceTranscript.Valid {
+		t.Fatalf("leased first voice was transcribed: %+v", first.ReferenceTranscript)
+	}
+	second, err := h.voices.Get(context.Background(), secondID)
+	if err != nil {
+		t.Fatalf("Get second: %v", err)
+	}
+	if !second.ReferenceTranscript.Valid || second.ReferenceTranscript.V != "Second transcript." {
+		t.Fatalf("second transcript = %+v, want completed", second.ReferenceTranscript)
+	}
+}
+
+func TestProactiveTranscriptionFailureDoesNotBlockJobSubmission(t *testing.T) {
+	h := newHarness(t)
+	jobID := h.enqueue(t, h.stockID, "queue keeps moving")
+	client := &fakeSubmitter{id: "runpod-still-submitted"}
+	whisper := &fakeWhisper{err: errors.New("whisper unavailable")}
+	w := h.worker(client, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+
+	w.Tick(context.Background())
+
+	job := h.get(t, jobID)
+	if job.Status != jobs.StatusSubmitted {
+		t.Fatalf("job status = %q, want submitted (err=%q)", job.Status, job.Error)
+	}
+	if len(client.inputs) != 1 {
+		t.Fatalf("submitted inputs = %d, want 1", len(client.inputs))
+	}
+	if whisper.callCount() != 1 {
+		t.Fatalf("whisper calls = %d, want 1", whisper.callCount())
+	}
+}
+
 // A failed lazy recovery must fail the job outright rather than spend a
 // RunPod credit on a job Higgs cannot clone the voice for.
 func TestHiggsJobLazyRecoveryFailureFailsJobWithoutSubmitting(t *testing.T) {
@@ -1237,7 +1309,6 @@ func TestHTTPWhisperClientRejectsInvalidWordTimings(t *testing.T) {
 	}
 }
 
-
 func TestSubmitRoutesAuKJobAndRemovesPrivateInput(t *testing.T) {
 	h := newHarness(t)
 	inputPath := filepath.Join(t.TempDir(), "source.wav")
@@ -1268,6 +1339,34 @@ func TestSubmitRoutesAuKJobAndRemovesPrivateInput(t *testing.T) {
 	}
 }
 
+func TestAuKZeroShotBypassesVoiceTranscriptionGate(t *testing.T) {
+	h := newHarness(t)
+	promptPath := filepath.Join(t.TempDir(), "prompt.wav")
+	if err := os.WriteFile(promptPath, []byte("RIFF-PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := h.enqueueFull(t, h.cloneID, "say hello", jobs.AuKModel, map[string]any{
+		"task": runpod.AuKTaskZeroShotTTS, "prompt_audio_path": promptPath,
+		"model_variant": runpod.AuKVariantFlash, "nfe": 4,
+		"cfg_scale": 0, "response_delivery": runpod.AuKDeliveryBase64,
+		"gen_seconds": 6,
+	})
+	client := &fakeSubmitter{id: "auk-zero-shot"}
+	whisper := &fakeWhisper{err: errors.New("must not be called")}
+	h.worker(client, 2, WithWhisperClient(whisper)).Tick(context.Background())
+
+	got := h.get(t, id)
+	if got.Status != jobs.StatusSubmitted {
+		t.Fatalf("job = %+v", got)
+	}
+	if whisper.callCount() != 0 {
+		t.Errorf("whisper calls = %d, want 0 for AuK's optional prompt transcript", whisper.callCount())
+	}
+	if len(client.aukInputs) != 1 || client.aukInputs[0].PromptAudio != base64.StdEncoding.EncodeToString([]byte("RIFF-PROMPT")) {
+		t.Fatalf("AuK inputs = %+v", client.aukInputs)
+	}
+}
+
 func TestAuKTransientSubmitFailureRetainsInputForRetry(t *testing.T) {
 	h := newHarness(t)
 	inputPath := filepath.Join(t.TempDir(), "source.wav")
@@ -1292,7 +1391,7 @@ func TestAuKTransientSubmitFailureRetainsInputForRetry(t *testing.T) {
 
 func TestBuildAuKInputPreservesURLAndParameters(t *testing.T) {
 	h := newHarness(t)
-	job := jobs.Job{Text: "say hello", Model: jobs.AuKModel, ParamsJSON: `{"task":"zero_shot_tts","prompt_audio":"https://example.test/prompt.wav","prompt_text":"hello","gen_seconds":2.5,"gen_text":"hello","model_variant":"base","nfe":32,"cfg_scale":2.5,"seed":99,"response_delivery":"s3"}`}
+	job := jobs.Job{Text: "say hello", Model: jobs.AuKModel, ParamsJSON: `{"task":"zero_shot_tts","prompt_audio":"https://example.test/prompt.wav","prompt_text":"hello","gen_seconds":2.5,"model_variant":"base","nfe":32,"cfg_scale":2.5,"seed":99,"response_delivery":"s3"}`}
 	in, err := h.worker(&fakeSubmitter{}, 1).buildAuKInput(job)
 	if err != nil {
 		t.Fatalf("buildAuKInput: %v", err)

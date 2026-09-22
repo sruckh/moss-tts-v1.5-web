@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/sruckh/timbre/internal/auth"
 	"github.com/sruckh/timbre/internal/voices"
 	"github.com/sruckh/timbre/internal/web"
 )
@@ -45,9 +47,29 @@ var allowedExt = map[string]bool{
 // handleVoiceLibrary answers GET /voices. An Accept: application/json caller
 // (used by the verification checks and any API client) gets the row list; a
 // browser gets the rendered voice-library page.
+// voiceCards returns the caller's visible cards with request-scoped delete
+// authority attached for the browser/API. Ownership comes from creator_id, not
+// the many-to-many access grants or the legacy owner_id mirror.
+func (s *Server) voiceCards(r *http.Request, userID int64) ([]voices.Voice, error) {
+	items, err := s.voices.List(r.Context(), userID)
+	if err != nil {
+		return nil, err
+	}
+	who, err := s.auth.LiveIdentity(r.Context(), userID)
+	if err != nil {
+		return nil, err
+	}
+	isAdmin := who.Role == auth.RoleAdmin
+	for i := range items {
+		items[i].CanDelete = items[i].Kind == voices.KindCloned &&
+			(isAdmin || items[i].CreatorID.Valid && items[i].CreatorID.V == userID)
+	}
+	return items, nil
+}
+
 func (s *Server) handleVoiceLibrary(w http.ResponseWriter, r *http.Request) {
 	userID, _ := s.auth.UserID(r)
-	items, err := s.voices.List(r.Context(), userID)
+	items, err := s.voiceCards(r, userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
@@ -61,6 +83,25 @@ func (s *Server) handleVoiceLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = web.VoiceLibrary(items).Render(s.navContext(r), w)
+}
+
+func (s *Server) handleVoiceGrid(w http.ResponseWriter, r *http.Request) {
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	items, err := s.voiceCards(r, userID)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	var selectedID int64
+	if len(items) > 0 {
+		selectedID = items[0].ID
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = web.VoiceGrid(items, selectedID).Render(r.Context(), w)
 }
 
 // handleVoiceUpload answers POST /voices/upload (multipart). It validates type
@@ -126,7 +167,7 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.voices.List(r.Context(), userID)
+	items, err := s.voiceCards(r, userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
@@ -165,7 +206,7 @@ func (s *Server) handleVoiceRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID, _ := s.auth.UserID(r)
-	items, err := s.voices.List(r.Context(), userID)
+	items, err := s.voiceCards(r, userID)
 	if err != nil {
 		serverError(w, r, err)
 		return
@@ -193,6 +234,74 @@ func (s *Server) handleVoiceRename(w http.ResponseWriter, r *http.Request) {
 // This is a session-gated preview, not a public URL: the response is marked
 // private and RunPod still receives the bytes base64-inline in the submission
 // payload — it is never given a link. Stock voices have no reference and 404.
+// handleVoiceDelete removes an uploaded card for its creator or an administrator.
+// Database state is committed before the reference blob is unlinked, matching
+// the existing job/user deletion order.
+func (s *Server) handleVoiceDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid voice id", http.StatusBadRequest)
+		return
+	}
+	userID, ok := s.auth.UserID(r)
+	if !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	who, err := s.auth.LiveIdentity(r.Context(), userID)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	if err := s.deleteVoice(r, id, userID, who.Role == auth.RoleAdmin); err != nil {
+		s.writeVoiceDeleteError(w, r, err)
+		return
+	}
+
+	if wantsJSON(r) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		return
+	}
+	items, err := s.voiceCards(r, userID)
+	if err != nil {
+		serverError(w, r, err)
+		return
+	}
+	var selectedID int64
+	if len(items) > 0 {
+		selectedID = items[0].ID
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = web.VoiceGrid(items, selectedID).Render(r.Context(), w)
+}
+
+func (s *Server) deleteVoice(r *http.Request, id, actorID int64, isAdmin bool) error {
+	path, err := s.voices.Delete(r.Context(), id, actorID, isAdmin)
+	if err != nil {
+		return err
+	}
+	if path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			slog.Warn("remove deleted voice reference", "voice_id", id, "path", path, "err", err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) writeVoiceDeleteError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, voices.ErrNotFound):
+		http.Error(w, "voice not found", http.StatusNotFound)
+	case errors.Is(err, voices.ErrDeleteForbidden):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case errors.Is(err, voices.ErrNotDeletable):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		serverError(w, r, err)
+	}
+}
+
 func (s *Server) handleVoiceReference(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil || id <= 0 {

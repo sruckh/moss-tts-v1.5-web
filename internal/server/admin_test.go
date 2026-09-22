@@ -66,6 +66,7 @@ func TestEveryAdminRouteRejectsNonAdmin(t *testing.T) {
 		{http.MethodPost, "/admin/voices/1/global", url.Values{"is_global": {"false"}}},
 		{http.MethodPost, "/admin/voices/1/owner", url.Values{"user_id": {"0"}}},
 		{http.MethodPost, "/admin/voices/1/unassign", url.Values{"user_id": {"1"}}},
+		{http.MethodDelete, "/admin/voices/1", nil},
 	}
 
 	for _, test := range tests {
@@ -420,5 +421,8 @@ func TestAdminDeleteUserCleansJobsAudioAndVoiceOwner(t *testing.T) {
 	}
 	if card.OwnerID.Valid {
 		t.Fatalf("voice owner = %+v, want NULL", card.OwnerID)
+	}
+	if card.CreatorID.Valid {
+		t.Fatalf("voice creator = %+v, want NULL", card.CreatorID)
 	}
 }

@@ -183,7 +183,6 @@ func (j Job) IsHiggs() bool { return j.Model == HiggsModel }
 // exclusive: a job carries exactly one model string.
 func (j Job) IsBreeze() bool { return j.Model == BreezeModel }
 
-
 // IsAuK reports whether the job uses Tencent AuK's generation/editing worker.
 func (j Job) IsAuK() bool { return j.Model == AuKModel }
 
@@ -240,9 +239,10 @@ func (s *Store) Enqueue(ctx context.Context, in NewJob) (int64, error) {
 	if len(language) > MaxLanguageLen {
 		return 0, ErrLanguage
 	}
-	// Conventional engines render from a voice. Breeze design and every AuK
-	// task are intentionally voiceless at the queue layer: AuK carries its own
-	// source/prompt audio in the job parameters when a task needs one.
+	// Conventional engines render from a voice. Breeze design and AuK's
+	// instruction/editing tasks are intentionally voiceless at the queue layer.
+	// AuK zero-shot jobs may retain the selected cloned voice for attribution
+	// while carrying a job-owned copy of its reference audio in params.
 	if in.VoiceID <= 0 && !isBreezeDesign(in.Model, in.Params) && in.Model != AuKModel {
 		return 0, ErrNoVoice
 	}
