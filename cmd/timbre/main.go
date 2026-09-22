@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -46,11 +47,7 @@ func run(log *slog.Logger) error {
 		"runpod_key_present", cfg.HasRunPodKey(),
 		"llm_configured", cfg.LLMConfigured())
 
-	if err := os.MkdirAll(cfg.AudioDir, 0o750); err != nil {
-		return err
-	}
-
-	handle, err := db.Open(cfg.DBPath)
+	handle, err := openDB(cfg)
 	if err != nil {
 		return err
 	}
@@ -63,16 +60,8 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	authManager, ephemeralKey, err := auth.NewManager(handle,
-		[]byte(cfg.SessionSecret), cfg.SecureCookies())
+	authManager, err := newAuthManager(ctx, handle, cfg, log)
 	if err != nil {
-		return err
-	}
-	if ephemeralKey {
-		log.Warn("TIMBRE_SESSION_SECRET unset; generated an ephemeral key — " +
-			"sessions will not survive restarts")
-	}
-	if err := authManager.Bootstrap(ctx, log, cfg.AdminUsername, cfg.AdminPassword); err != nil {
 		return err
 	}
 
@@ -91,29 +80,7 @@ func run(log *slog.Logger) error {
 	if !assistantClient.Configured() {
 		log.Warn("LLM_BASE_URL, LLM_API_KEY or LLM_MODEL_ID missing; the AuK prompt assistant will report itself unavailable")
 	}
-
-	// The submission worker is the only caller of RunPod. It starts even when
-	// the endpoint or key is missing: queued jobs then fail with a recorded
-	// reason, which is far easier to diagnose than a queue that never moves.
-	if !runpodClient.Configured() {
-		log.Warn("RunPod endpoint or API key missing; queued jobs will fail until both are set")
-	}
-	whisperClient := worker.NewHTTPWhisperClient(worker.DefaultWhisperURL, worker.WhisperTimeout)
-	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log,
-		worker.WithWhisperClient(whisperClient),
-		worker.WithProactiveTranscription(true))
-	poller := worker.NewPoller(jobStore, runpodClient, cfg.AudioDir, log, worker.WithPollerAligner(whisperClient))
-
-	var workerDone sync.WaitGroup
-	workerDone.Add(2)
-	go func() {
-		defer workerDone.Done()
-		submitter.Run(ctx)
-	}()
-	go func() {
-		defer workerDone.Done()
-		poller.Run(ctx)
-	}()
+	workerDone := startWorkers(ctx, cfg, jobStore, voiceStore, runpodClient, log)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Addr,
@@ -151,4 +118,57 @@ func run(log *slog.Logger) error {
 	stop()
 	workerDone.Wait()
 	return err
+}
+
+// openDB creates the audio directory and opens the SQLite database.
+func openDB(cfg config.Config) (*sql.DB, error) {
+	if err := os.MkdirAll(cfg.AudioDir, 0o750); err != nil {
+		return nil, err
+	}
+	return db.Open(cfg.DBPath)
+}
+
+// newAuthManager builds the session manager and seeds the bootstrap admin.
+func newAuthManager(ctx context.Context, handle *sql.DB, cfg config.Config, log *slog.Logger) (*auth.Manager, error) {
+	authManager, ephemeralKey, err := auth.NewManager(handle,
+		[]byte(cfg.SessionSecret), cfg.SecureCookies())
+	if err != nil {
+		return nil, err
+	}
+	if ephemeralKey {
+		log.Warn("TIMBRE_SESSION_SECRET unset; generated an ephemeral key — " +
+			"sessions will not survive restarts")
+	}
+	if err := authManager.Bootstrap(ctx, log, cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		return nil, err
+	}
+	return authManager, nil
+}
+
+// startWorkers launches the submission worker and the status poller; the
+// returned WaitGroup reports when both have exited after ctx is cancelled.
+func startWorkers(ctx context.Context, cfg config.Config, jobStore *jobs.Store, voiceStore *voices.Store, runpodClient *runpod.Client, log *slog.Logger) *sync.WaitGroup {
+	// The submission worker is the only caller of RunPod. It starts even when
+	// the endpoint or key is missing: queued jobs then fail with a recorded
+	// reason, which is far easier to diagnose than a queue that never moves.
+	if !runpodClient.Configured() {
+		log.Warn("RunPod endpoint or API key missing; queued jobs will fail until both are set")
+	}
+	whisperClient := worker.NewHTTPWhisperClient(worker.DefaultWhisperURL, worker.WhisperTimeout)
+	submitter := worker.New(jobStore, voiceStore, runpodClient, cfg.MaxInFlight, log,
+		worker.WithWhisperClient(whisperClient),
+		worker.WithProactiveTranscription(true))
+	poller := worker.NewPoller(jobStore, runpodClient, cfg.AudioDir, log, worker.WithPollerAligner(whisperClient))
+
+	var workerDone sync.WaitGroup
+	workerDone.Add(2)
+	go func() {
+		defer workerDone.Done()
+		submitter.Run(ctx)
+	}()
+	go func() {
+		defer workerDone.Done()
+		poller.Run(ctx)
+	}()
+	return &workerDone
 }

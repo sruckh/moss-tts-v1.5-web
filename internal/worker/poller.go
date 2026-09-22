@@ -120,18 +120,7 @@ func (p *Poller) Tick(ctx context.Context) {
 }
 
 func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
-	var res runpod.StatusResult
-	var err error
-	switch {
-	case job.IsHiggs():
-		res, err = p.client.StatusHiggs(ctx, job.RunPodID)
-	case job.IsBreeze():
-		res, err = p.client.StatusBreeze(ctx, job.RunPodID)
-	case job.IsAuK():
-		res, err = p.client.StatusAuK(ctx, job.RunPodID)
-	default:
-		res, err = p.client.Status(ctx, job.RunPodID)
-	}
+	res, err := p.status(ctx, job)
 	if err != nil {
 		if runpod.IsPermanent(err) {
 			p.log.Error("poller: status query rejected permanently", "job", job.ID, "runpod_id", job.RunPodID, "err", err)
@@ -154,100 +143,137 @@ func (p *Poller) pollOne(ctx context.Context, job jobs.Job) {
 		}
 
 	case runpod.StatusFailed, runpod.StatusCancelled, runpod.StatusTimedOut:
-		reason := res.ErrorString()
-		// Breeze's structured failure envelope can land nested in
-		// Output.Error rather than at the top level (RunPod's runtime only
-		// lifts a top-level "error" key); ErrorString never looks there, so a
-		// nested envelope would otherwise be silently discarded in favor of
-		// the generic fallback below.
-		if job.IsBreeze() {
-			if env := res.BreezeError(); env != nil {
-				reason = env.Error()
-			}
-		}
-		if job.IsAuK() {
-			if env := res.AuKError(); env != nil {
-				reason = env.Error()
-			}
-		}
-		if reason == "" {
-			reason = "RunPod execution failed"
-		}
+		reason := failureReason(job, res)
 		p.log.Error("poller: job failed at RunPod", "job", job.ID, "runpod_id", job.RunPodID, "reason", reason)
 		p.fail(ctx, job.ID, reason)
 
 	case runpod.StatusCompleted:
-		audioData, err := outputAudio(ctx, res.Output)
-		if err != nil {
-			p.log.Error("poller: collect completed audio", "job", job.ID, "err", err)
-			p.fail(ctx, job.ID, err.Error())
-			return
-		}
-
-		dir := filepath.Join(p.audioDir, "renders")
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			p.log.Error("poller: create renders dir", "dir", dir, "err", err)
-			p.fail(ctx, job.ID, "failed to create audio output directory: "+err.Error())
-			return
-		}
-
-		ext := res.Output.Format
-		if ext == "" {
-			ext = "wav"
-		}
-		filename := fmt.Sprintf("job_%d.%s", job.ID, ext)
-		fullPath := filepath.Join(dir, filename)
-
-		if err := os.WriteFile(fullPath, audioData, 0o640); err != nil {
-			p.log.Error("poller: write audio file", "path", fullPath, "err", err)
-			p.fail(ctx, job.ID, "failed to save audio file: "+err.Error())
-			return
-		}
-
-		sampleRate := res.Output.SampleRate
-		if sampleRate <= 0 {
-			sampleRate = 24000
-		}
-
-		// word_timings is optional: the worker omits it for streaming renders,
-		// older builds, or failed alignment. nil ⇒ empty string ⇒ the player
-		// interpolates word positions. A marshal failure is treated like absence
-		// — it never fails a job that already has good audio.
-		//
-		// For completed Higgs and Breeze jobs, word alignment is performed via
-		// the local Whisper aligner on the saved PCM WAV bytes. Breeze carries
-		// no native timings at all — its worker's success payload has no
-		// word_timings field — so the aligner is the only source it has. MOSS
-		// completion payloads bypass local alignment and preserve native
-		// word_timings verbatim.
-		alignmentJSON := ""
-		if job.IsHiggs() || job.IsBreeze() || shouldAlignAuK(job, res.Output) {
-			if p.aligner != nil {
-				wt, err := p.aligner.AlignOutput(ctx, audioData)
-				if err != nil {
-					p.log.Warn("poller: output word alignment failed", "job", job.ID, "model", job.Model, "err", err)
-				} else if wt != nil {
-					if b, err := json.Marshal(wt); err == nil {
-						alignmentJSON = string(b)
-					}
-				}
-			}
-		} else {
-			if res.Output.WordTimings != nil {
-				if b, err := json.Marshal(res.Output.WordTimings); err == nil {
-					alignmentJSON = string(b)
-				}
-			}
-		}
-
-		if err := p.jobs.MarkReady(ctx, job.ID, fullPath, ext, sampleRate, res.DelayTime, res.ExecutionTime, alignmentJSON); err != nil {
-			p.log.Error("poller: mark ready", "job", job.ID, "err", err)
-			return
-		}
-		p.log.Info("job ready", "job", job.ID, "runpod_id", job.RunPodID, "path", fullPath)
+		p.complete(ctx, job, res)
 	}
 }
 
+// status asks the engine-specific RunPod endpoint about a job.
+func (p *Poller) status(ctx context.Context, job jobs.Job) (runpod.StatusResult, error) {
+	switch {
+	case job.IsHiggs():
+		return p.client.StatusHiggs(ctx, job.RunPodID)
+	case job.IsBreeze():
+		return p.client.StatusBreeze(ctx, job.RunPodID)
+	case job.IsAuK():
+		return p.client.StatusAuK(ctx, job.RunPodID)
+	default:
+		return p.client.Status(ctx, job.RunPodID)
+	}
+}
+
+// failureReason prefers an engine's structured failure envelope over RunPod's
+// top-level error string. Breeze's envelope can land nested in Output.Error
+// rather than at the top level (RunPod's runtime only lifts a top-level
+// "error" key) and ErrorString never looks there, so a nested envelope would
+// otherwise be silently discarded in favor of the generic fallback; AuK's
+// JSON-string envelope is the same story.
+func failureReason(job jobs.Job, res runpod.StatusResult) string {
+	reason := res.ErrorString()
+	if job.IsBreeze() {
+		if env := res.BreezeError(); env != nil {
+			reason = env.Error()
+		}
+	}
+	if job.IsAuK() {
+		if env := res.AuKError(); env != nil {
+			reason = env.Error()
+		}
+	}
+	if reason == "" {
+		reason = "RunPod execution failed"
+	}
+	return reason
+}
+
+// complete collects a finished render's audio, saves it, attaches word
+// alignment, and flips the job to ready.
+func (p *Poller) complete(ctx context.Context, job jobs.Job, res runpod.StatusResult) {
+	audioData, err := outputAudio(ctx, res.Output)
+	if err != nil {
+		p.log.Error("poller: collect completed audio", "job", job.ID, "err", err)
+		p.fail(ctx, job.ID, err.Error())
+		return
+	}
+
+	fullPath, ext, err := p.saveRender(job.ID, audioData, res.Output.Format)
+	if err != nil {
+		p.fail(ctx, job.ID, err.Error())
+		return
+	}
+
+	sampleRate := res.Output.SampleRate
+	if sampleRate <= 0 {
+		sampleRate = 24000
+	}
+
+	alignment := p.alignmentJSON(ctx, job, res, audioData)
+
+	if err := p.jobs.MarkReady(ctx, job.ID, fullPath, ext, sampleRate, res.DelayTime, res.ExecutionTime, alignment); err != nil {
+		p.log.Error("poller: mark ready", "job", job.ID, "err", err)
+		return
+	}
+	p.log.Info("job ready", "job", job.ID, "runpod_id", job.RunPodID, "path", fullPath)
+}
+
+// saveRender writes the finished audio under <audioDir>/renders/job_<id>.<ext>.
+func (p *Poller) saveRender(jobID int64, audioData []byte, format string) (string, string, error) {
+	dir := filepath.Join(p.audioDir, "renders")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		p.log.Error("poller: create renders dir", "dir", dir, "err", err)
+		return "", "", fmt.Errorf("failed to create audio output directory: %w", err)
+	}
+
+	ext := format
+	if ext == "" {
+		ext = "wav"
+	}
+	fullPath := filepath.Join(dir, fmt.Sprintf("job_%d.%s", jobID, ext))
+
+	if err := os.WriteFile(fullPath, audioData, 0o640); err != nil {
+		p.log.Error("poller: write audio file", "path", fullPath, "err", err)
+		return "", "", fmt.Errorf("failed to save audio file: %w", err)
+	}
+	return fullPath, ext, nil
+}
+
+// alignmentJSON decides where word timings come from. For completed Higgs,
+// Breeze, and AuK TTS jobs the local Whisper aligner runs on the saved PCM
+// WAV bytes — Breeze carries no native timings at all, and MOSS completion
+// payloads bypass local alignment and preserve native word_timings verbatim.
+// word_timings is optional: the worker omits it for streaming renders, older
+// builds, or failed alignment. nil ⇒ empty string ⇒ the player interpolates
+// word positions. A marshal failure is treated like absence — it never fails
+// a job that already has good audio.
+func (p *Poller) alignmentJSON(ctx context.Context, job jobs.Job, res runpod.StatusResult, audioData []byte) string {
+	if job.IsHiggs() || job.IsBreeze() || shouldAlignAuK(job, res.Output) {
+		if p.aligner == nil {
+			return ""
+		}
+		wt, err := p.aligner.AlignOutput(ctx, audioData)
+		if err != nil {
+			p.log.Warn("poller: output word alignment failed", "job", job.ID, "model", job.Model, "err", err)
+			return ""
+		}
+		if wt == nil {
+			return ""
+		}
+		if b, err := json.Marshal(wt); err == nil {
+			return string(b)
+		}
+		return ""
+	}
+	if res.Output.WordTimings != nil {
+		if b, err := json.Marshal(res.Output.WordTimings); err == nil {
+			return string(b)
+		}
+	}
+	return ""
+}
 
 const maxRunPodOutputBytes = 64 << 20
 
@@ -257,13 +283,7 @@ func outputAudio(ctx context.Context, output runpod.Output) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode audio base64: %w", err)
 		}
-		if len(data) == 0 {
-			return nil, fmt.Errorf("RunPod output contains empty audio data")
-		}
-		if len(data) > maxRunPodOutputBytes {
-			return nil, fmt.Errorf("RunPod output exceeds the %d byte limit", maxRunPodOutputBytes)
-		}
-		return data, nil
+		return checkAudio(data)
 	}
 	if output.AudioURL == "" {
 		return nil, fmt.Errorf("RunPod output contains no audio data")
@@ -288,6 +308,11 @@ func outputAudio(ctx context.Context, output runpod.Output) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read RunPod audio: %w", err)
 	}
+	return checkAudio(data)
+}
+
+// checkAudio rejects empty or oversized payloads, whatever route they arrived by.
+func checkAudio(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("RunPod output contains empty audio data")
 	}
@@ -296,7 +321,6 @@ func outputAudio(ctx context.Context, output runpod.Output) ([]byte, error) {
 	}
 	return data, nil
 }
-
 
 func shouldAlignAuK(job jobs.Job, output runpod.Output) bool {
 	if !job.IsAuK() {

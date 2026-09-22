@@ -39,6 +39,27 @@ func rowHTML(t *testing.T, html, id string) string {
 	return html[start : at+end]
 }
 
+// wantHTML fails the test unless html contains every want. The failure names
+// label first so a multi-part test still says which page went missing.
+func wantHTML(t *testing.T, label, html string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(html, w) {
+			t.Errorf("%s missing %q", label, w)
+		}
+	}
+}
+
+// banHTML fails the test if html contains any of the banned substrings.
+func banHTML(t *testing.T, label, html string, banned ...string) {
+	t.Helper()
+	for _, b := range banned {
+		if strings.Contains(html, b) {
+			t.Errorf("%s must not contain %q", label, b)
+		}
+	}
+}
+
 // sampleJobs is a queue with one of each state, newest first — the shape the
 // handlers pass in.
 func sampleJobs() []jobs.Job {
@@ -102,25 +123,15 @@ func TestQueueDownloadControlIsIconOnly(t *testing.T) {
 func TestQueueMarksSelectedRow(t *testing.T) {
 	html := render(t, Queue(sampleJobs(), 0, nil, 8))
 
-	if strings.Count(html, `aria-selected="true"`) != 1 {
-		t.Errorf("want exactly one selected row, got %d", strings.Count(html, `aria-selected="true"`))
+	if got := strings.Count(html, `aria-selected="true"`); got != 1 {
+		t.Errorf("want exactly one selected row, got %d", got)
 	}
 	row := rowHTML(t, html, "job-8")
-	if !strings.Contains(row, `aria-selected="true"`) || !strings.Contains(row, "is-selected") {
-		t.Errorf("row job-8 is not marked selected: %s", row)
-	}
 	// The chip ships on every row and is revealed by the class, so the word and
 	// the wash can never disagree.
-	if !strings.Contains(row, "In the player") || !strings.Contains(row, "queue-mark") {
-		t.Errorf("row job-8 carries no selection marker: %s", row)
-	}
-	other := rowHTML(t, html, "job-9")
-	if strings.Contains(other, `aria-selected="true"`) || strings.Contains(other, "is-selected") {
-		t.Errorf("row job-9 should not be selected: %s", other)
-	}
-	if !strings.Contains(html, `hx-get="/jobs/8/player"`) {
-		t.Error("queue row does not load its take into the player")
-	}
+	wantHTML(t, "selected row job-8", row, `aria-selected="true"`, "is-selected", "In the player", "queue-mark")
+	banHTML(t, "unselected row job-9", rowHTML(t, html, "job-9"), `aria-selected="true"`, "is-selected")
+	wantHTML(t, "queue row", html, `hx-get="/jobs/8/player"`)
 }
 
 func TestQueueRowsPublishReadySourceSelection(t *testing.T) {
@@ -402,17 +413,13 @@ func TestScrollableListDisablesScrollAnchoring(t *testing.T) {
 func TestQueueScrollContainerIsOutsideSwappedFragment(t *testing.T) {
 	fragment := render(t, Queue(sampleJobs(), 0, nil, 0))
 
-	for _, banned := range []string{"scrollable-list", "max-h-[500px]", "hx-on"} {
-		if strings.Contains(fragment, banned) {
-			t.Errorf("queue fragment contains %q — scroll/JS state inside the swapped fragment is reset by every poll", banned)
-		}
-	}
-	if !strings.Contains(fragment, `hx-swap="outerHTML show:none"`) {
-		t.Error("queue fragment missing 'show:none' swap modifier — without it every 2s poll scrolls #queue into view, dragging the page scrollbar to the bottom")
-	}
-	if !strings.Contains(fragment, `hx-swap="innerHTML show:none"`) {
-		t.Error("queue row's player load missing 'show:none' — selecting a take must not scroll the page to the player")
-	}
+	// Scroll/JS state inside the swapped fragment is reset by every poll.
+	banHTML(t, "queue fragment", fragment, "scrollable-list", "max-h-[500px]", "hx-on")
+	// Without 'show:none' every 2s poll scrolls #queue into view, dragging the
+	// page scrollbar to the bottom; the row's player load must not scroll to
+	// the player either. The poll AND every row's delete button swap outerHTML.
+	wantHTML(t, "queue fragment", fragment,
+		`hx-swap="outerHTML show:none"`, `hx-swap="innerHTML show:none"`)
 	if got := strings.Count(fragment, `hx-swap="outerHTML show:none"`); got < 2 {
 		t.Errorf("expected the poll AND every row's delete button to swap with show:none, found %d outerHTML show:none swaps", got)
 	}
@@ -475,44 +482,34 @@ func TestComposeAuKExposesCompleteTaskContract(t *testing.T) {
 
 func TestComposeExposesAuKPromptAssistant(t *testing.T) {
 	html := render(t, Compose(sampleVoices(), 1, jobs.Job{}))
-	for _, want := range []string{
+	wantHTML(t, "AuK assistant panel", html,
 		`x-data="aukAssistant()"`,
 		`Ask the AI prompt assistant`,
 		`Ask assistant`,
 		`Clear conversation`,
 		`Insert into instruction`,
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("AuK assistant panel missing %q", want)
-		}
-	}
+	)
 	// The parent form must listen for the assistant's apply event and route
 	// it into both the instruction field and the Mode selector — a reply
 	// whose instruction says "using the reference voice provided" is useless
 	// if the task stays on whatever the form defaulted to (see regression:
 	// an inserted zero-shot instruction under instruct_tts sends AuK no
 	// reference audio at all, since instruct_tts forbids it outright).
-	if !strings.Contains(html, `x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; aukInstructionTouched = true; if ($event.detail.task) { aukTask = $event.detail.task }; if ($event.detail.text) { aukTextHint = $event.detail.text; genSecondsTouched = false }"`) {
-		t.Error("compose form does not wire the assistant's apply event into aukInstruction, aukTask and aukTextHint")
-	}
-	if !strings.Contains(html, `@click="apply(m.instruction, m.task)"`) {
-		t.Error("insert-into-instruction button does not forward the parsed task alongside the instruction")
-	}
+	wantHTML(t, "compose form", html,
+		`x-on:timbre-assistant-apply.window="aukInstruction = $event.detail.instruction; aukInstructionTouched = true; if ($event.detail.task) { aukTask = $event.detail.task }; if ($event.detail.text) { aukTextHint = $event.detail.text; genSecondsTouched = false }"`,
+		`@click="apply(m.instruction, m.task)"`,
+	)
 
 	// The fetch target, the aukAssistant() factory and its task parser all
 	// live in the shared studioHelpers script, rendered once per page
 	// alongside Compose rather than inside it — same split as
 	// timbre-source-selected.
 	page := render(t, Studio(sampleJobs(), sampleVoices(), nil, 9))
-	for _, want := range []string{
+	wantHTML(t, "studioHelpers script", page,
 		`window.aukAssistant`, `/jobs/auk-assistant`, `timbre-assistant-apply`,
 		`parseTask:`, `zero_shot_tts`, `instruct_tts`, `content_edit`,
 		`acoustic_edit`, `paralinguistic_edit`, `separation`, `enhancement`,
-	} {
-		if !strings.Contains(page, want) {
-			t.Errorf("studioHelpers script missing %q", want)
-		}
-	}
+	)
 
 	// Regression history, each confirmed against a real reply that broke
 	// the prior approach:
@@ -530,24 +527,20 @@ func TestComposeExposesAuKPromptAssistant(t *testing.T) {
 	// format never wraps INSTRUCTION across lines — and must strip
 	// delimiters only from the exact first/last character, never by
 	// hunting for a "matching" quote inside the value.
-	if strings.Contains(page, `/INSTRUCTION:\s*"([^"]*)"/`) {
-		t.Error("parseInstruction regressed to the naive pattern that truncates on any quote")
+	for _, bad := range []struct{ pattern, why string }{
+		{`/INSTRUCTION:\s*"([^"]*)"/`, "regressed to the naive pattern that truncates on any quote"},
+		{`(?:\\.|[^"\\])*`, "regressed to character-class quote-matching, which cannot survive an unescaped inner quote"},
+		{`(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:|` + "`" + "`" + "`" + `|\$\)/`, "regressed to bounding by a later field/fence/end-of-text, which over-captures trailing prose when a reply omits them"},
+	} {
+		if strings.Contains(page, bad.pattern) {
+			t.Errorf("parseInstruction %s", bad.why)
+		}
 	}
-	if strings.Contains(page, `(?:\\.|[^"\\])*`) {
-		t.Error("parseInstruction regressed to character-class quote-matching, which cannot survive an unescaped inner quote")
-	}
-	if strings.Contains(page, `(?:TASK|REQUIRED AUDIO INPUT|NOTES)\s*:|`+"`"+"`"+"`"+`|\$\)/`) {
-		t.Error("parseInstruction regressed to bounding by a later field/fence/end-of-text, which over-captures trailing prose when a reply omits them")
-	}
-	if !strings.Contains(page, `/INSTRUCTION:\s*(.+)/`) {
-		t.Error("parseInstruction does not bound the INSTRUCTION value to its own single line")
-	}
-	if !strings.Contains(page, `pairs = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019']]`) {
-		t.Error("parseInstruction does not strip a known delimiter pair from exactly the first/last character")
-	}
-	if !strings.Contains(page, `.replace(/\\(["\\nrt])/g`) {
-		t.Error("parseInstruction does not unescape backslash sequences a properly-escaped reply may still carry")
-	}
+	wantHTML(t, "parseInstruction", page,
+		`/INSTRUCTION:\s*(.+)/`,
+		`pairs = [['"', '"'], ["'", "'"], ['\u201c', '\u201d'], ['\u2018', '\u2019']]`,
+		`.replace(/\\(["\\nrt])/g`,
+	)
 }
 
 func TestComposeDisablesEngineSpecificFields(t *testing.T) {

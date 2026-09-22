@@ -133,13 +133,43 @@ CREATE INDEX IF NOT EXISTS access_requests_status_created_idx ON access_requests
 // public-URL reference design — Goal 3 stores reference bytes on a volume and
 // base64-encodes them inline, so the column is unused. On a fresh database the
 // drop is a no-op.
+// Migrate creates the schema if it is not already present, then brings any
+// existing database up to it one guarded step at a time. Every statement is
+// idempotent, so Migrate is safe to run on every boot; the one-time backfills
+// are pinned to the pass that introduces their column. Steps run in the order
+// below — later steps read columns earlier steps add, so do not reorder.
 func Migrate(ctx context.Context, handle *sql.DB) error {
 	if _, err := handle.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	// Drop the vestigial voices.reference_public_url column carried over from
+	// Goal 2's public-URL reference design — Goal 3 stores reference bytes on a
+	// volume and base64-encodes them inline, so the column is unused. On a fresh
+	// database the drop is a no-op.
 	if err := dropColumnIfPresent(ctx, handle, "voices", "reference_public_url"); err != nil {
 		return fmt.Errorf("migrate: drop reference_public_url: %w", err)
 	}
+	if err := migrateJobColumns(ctx, handle); err != nil {
+		return err
+	}
+	if err := migrateUserColumns(ctx, handle); err != nil {
+		return err
+	}
+	if err := migrateVoiceColumns(ctx, handle); err != nil {
+		return err
+	}
+	if err := backfillLegacyVoiceOwners(ctx, handle); err != nil {
+		return err
+	}
+	// jobs needs no change: user_id has been NOT NULL since the table was
+	// created and every query already filters on it, so outputs are isolated by
+	// construction. Recorded here so later work does not re-derive it.
+	return nil
+}
+
+// migrateJobColumns adds the job columns that arrived after the original
+// schema and attributes pre-model renders.
+func migrateJobColumns(ctx context.Context, handle *sql.DB) error {
 	// jobs.attempts arrived with the submission worker; databases created before
 	// it need the column added rather than recreated.
 	if err := addColumnIfMissing(ctx, handle, "jobs", "attempts",
@@ -167,6 +197,12 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 	if err := addColumnIfMissing(ctx, handle, "jobs", "alignment_json", "TEXT"); err != nil {
 		return fmt.Errorf("migrate: add jobs.alignment_json: %w", err)
 	}
+	return nil
+}
+
+// migrateUserColumns adds the multi-user account columns and restores the
+// bootstrap admin the column defaults would otherwise strand.
+func migrateUserColumns(ctx context.Context, handle *sql.DB) error {
 	// users.role and users.status turn the single bootstrapped account into a
 	// population: role decides who may administer, status decides who reaches
 	// the studio at all. email is optional because the bootstrapped admin never
@@ -192,6 +228,13 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 		`UPDATE users SET role = 'admin', status = 'approved' WHERE id = (SELECT MIN(id) FROM users)`); err != nil {
 		return fmt.Errorf("migrate: restore bootstrap admin: %w", err)
 	}
+	return nil
+}
+
+// migrateVoiceColumns adds the voice columns: the legacy owner mirror, the
+// stable creator, the global flag with its one-time stock promote, and the
+// reference transcript.
+func migrateVoiceColumns(ctx context.Context, handle *sql.DB) error {
 	// owner_id remains a legacy mirror of the most recent access grant. It is
 	// nullable because stock cards have no owner and account deletion must orphan
 	// cards rather than destroy them.
@@ -235,23 +278,24 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 			return fmt.Errorf("migrate: backfill voices.is_global: %w", err)
 		}
 	}
-	// voice_assignments supersedes owner_id as the access-control source. Copy
-	// legacy ownership into the junction table so cards created between stages
-	// 01 and 04 stay visible after upgrade. INSERT OR IGNORE makes the backfill
-	// idempotent and preserves any additional many-to-many assignments.
-	if _, err := handle.ExecContext(ctx, `
-		INSERT OR IGNORE INTO voice_assignments (voice_id, user_id)
-		SELECT id, owner_id FROM voices WHERE owner_id IS NOT NULL`); err != nil {
-		return fmt.Errorf("migrate: backfill voice assignments: %w", err)
-	}
 	// voices.reference_transcript stores the text transcript of reference audio
 	// for cloned voices, required for Higgs TTS synthesis.
 	if err := addColumnIfMissing(ctx, handle, "voices", "reference_transcript", "TEXT"); err != nil {
 		return fmt.Errorf("migrate: add voices.reference_transcript: %w", err)
 	}
-	// jobs needs no change: user_id has been NOT NULL since the table was
-	// created and every query already filters on it, so outputs are isolated by
-	// construction. Recorded here so later work does not re-derive it.
+	return nil
+}
+
+// backfillLegacyVoiceOwners copies legacy ownership into the voice_assignments
+// junction table so cards created between stages 01 and 04 stay visible after
+// upgrade. It runs on every pass: INSERT OR IGNORE makes it idempotent and
+// preserves any additional many-to-many assignments.
+func backfillLegacyVoiceOwners(ctx context.Context, handle *sql.DB) error {
+	if _, err := handle.ExecContext(ctx, `
+		INSERT OR IGNORE INTO voice_assignments (voice_id, user_id)
+		SELECT id, owner_id FROM voices WHERE owner_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("migrate: backfill voice assignments: %w", err)
+	}
 	return nil
 }
 
