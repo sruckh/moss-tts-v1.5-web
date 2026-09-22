@@ -557,6 +557,26 @@ templ studioHelpers(selected int64) {
 			var vid = document.getElementById('voice_id');
 			if (vid && card.dataset.voiceId) { vid.value = card.dataset.voiceId; }
 		}
+		// A grid swap after delete may remove the card named by the compose form.
+		// Keep the current selection when it still exists; otherwise adopt the
+		// server-marked card (or the first remaining card) and sync the hidden id.
+		function timbrePaintVoice() {
+			var grid = document.getElementById('voice-grid');
+			if (!grid) { return; }
+			var cards = Array.from(grid.querySelectorAll('.voice-card'));
+			var vid = document.getElementById('voice_id');
+			if (cards.length === 0) {
+				if (vid) { vid.value = ''; }
+				return;
+			}
+			var selected = vid && vid.value
+				? cards.find(function (card) { return card.dataset.voiceId === vid.value; })
+				: null;
+			selected = selected || cards.find(function (card) {
+				return card.getAttribute('aria-pressed') === 'true';
+			}) || cards[0];
+			timbreSelectVoice(selected);
+		}
 		// Select a queue row: remember the take and mark it immediately, rather
 		// than waiting for the fragment HTMX is already fetching.
 		function timbreSelectTake(row) {
@@ -588,7 +608,11 @@ templ studioHelpers(selected int64) {
 			});
 		}
 		// htmx 4 renamed afterSwap/afterSettle to htmx:after:swap.
-		document.addEventListener('htmx:after:swap', timbrePaintTake);
+		document.addEventListener('htmx:after:swap', function () {
+			timbrePaintVoice();
+			timbrePaintTake();
+		});
+		timbrePaintVoice();
 		timbrePaintTake();
 		// Delegated to document so both survive a fragment swap.
 		document.addEventListener('click', function (e) {

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/sruckh/timbre/internal/auth"
+	"github.com/sruckh/timbre/internal/config"
 	"github.com/sruckh/timbre/internal/voices"
 )
 
@@ -146,6 +151,115 @@ func TestVoiceUploadAuthenticated(t *testing.T) {
 	}
 	if !strings.Contains(body, "MOSS-TTS v1.5") {
 		t.Errorf("grid dropped the stock voice; body=%s", body)
+	}
+}
+
+func TestVoiceGridFragmentPollsUntilTranscriptIsReady(t *testing.T) {
+	srv := newTestServer(t)
+	cookie := signInAs(t, srv, "grid_transcription", auth.StatusApproved)
+	voiceID := uploadClone(t, srv, cookie, "pending.wav", []byte("pending-reference"))
+
+	pending := do(t, srv, http.MethodGet, "/voices/grid", cookie)
+	if pending.Code != http.StatusOK {
+		t.Fatalf("pending grid status = %d, want 200", pending.Code)
+	}
+	if !strings.Contains(pending.Body.String(), `hx-get="/voices/grid"`) ||
+		!strings.Contains(pending.Body.String(), "Transcribing...") {
+		t.Fatalf("pending grid is not polling: %s", pending.Body.String())
+	}
+
+	if err := srv.voices.SetReferenceTranscript(context.Background(), voiceID, "Reference words."); err != nil {
+		t.Fatalf("SetReferenceTranscript: %v", err)
+	}
+	ready := do(t, srv, http.MethodGet, "/voices/grid", cookie)
+	if ready.Code != http.StatusOK {
+		t.Fatalf("ready grid status = %d, want 200", ready.Code)
+	}
+	if strings.Contains(ready.Body.String(), `hx-get="/voices/grid"`) {
+		t.Fatal("ready grid continues polling")
+	}
+	if !strings.Contains(ready.Body.String(), ">Ready</span>") {
+		t.Fatalf("ready grid did not repaint badge: %s", ready.Body.String())
+	}
+
+	unauthenticated := do(t, srv, http.MethodGet, "/voices/grid", nil)
+	if unauthenticated.Code != http.StatusFound {
+		t.Fatalf("unauthenticated grid status = %d, want 302", unauthenticated.Code)
+	}
+}
+
+func TestVoiceOwnerDeleteRemovesCardRecordAndReference(t *testing.T) {
+	var audioDir string
+	srv := newTestServerWithConfig(t, func(cfg *config.Config) { audioDir = cfg.AudioDir })
+	cookie := signInAs(t, srv, "voice_delete_owner", auth.StatusApproved)
+	voiceID := uploadClone(t, srv, cookie, "delete-me.wav", []byte("reference-to-delete"))
+	voice, err := srv.voices.Get(context.Background(), voiceID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	referencePath := filepath.Join(audioDir, voice.ReferencePath)
+
+	rec := do(t, srv, http.MethodDelete, "/voices/"+strconv.FormatInt(voiceID, 10), cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "delete-me") {
+		t.Fatalf("deleted card remains in grid: %s", rec.Body.String())
+	}
+	if _, err := srv.voices.Get(context.Background(), voiceID); !errors.Is(err, voices.ErrNotFound) {
+		t.Fatalf("Get after delete error = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(referencePath); !os.IsNotExist(err) {
+		t.Fatalf("reference file still exists or stat failed: %v", err)
+	}
+	var assignments int
+	if err := srv.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM voice_assignments WHERE voice_id = ?`, voiceID).Scan(&assignments); err != nil {
+		t.Fatalf("count assignments: %v", err)
+	}
+	if assignments != 0 {
+		t.Fatalf("assignments = %d, want 0", assignments)
+	}
+}
+
+func TestVoiceDeleteRejectsAssignedNonCreatorAndStock(t *testing.T) {
+	srv := newTestServer(t)
+	ownerCookie := signInAs(t, srv, "voice_creator", auth.StatusApproved)
+	assigneeCookie := signInAs(t, srv, "voice_assignee", auth.StatusApproved)
+	assigneeID := userIDByName(t, srv, "voice_assignee")
+	voiceID := uploadClone(t, srv, ownerCookie, "creator-only.wav", []byte("private-reference"))
+	if err := srv.voices.Assign(context.Background(), voiceID, assigneeID); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+
+	rec := do(t, srv, http.MethodDelete, "/voices/"+strconv.FormatInt(voiceID, 10), assigneeCookie)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("assignee delete status = %d, want 403 (body %q)", rec.Code, rec.Body.String())
+	}
+	if _, err := srv.voices.Get(context.Background(), voiceID); err != nil {
+		t.Fatalf("voice disappeared after forbidden delete: %v", err)
+	}
+
+	stockID := firstVoiceID(t, srv, ownerCookie)
+	rec = do(t, srv, http.MethodDelete, "/voices/"+strconv.FormatInt(stockID, 10), ownerCookie)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("stock delete status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminCanDeleteAnotherUsersVoice(t *testing.T) {
+	srv := newTestServer(t)
+	adminCookie := login(t, srv)
+	ownerCookie := signInAs(t, srv, "admin_voice_target", auth.StatusApproved)
+	voiceID := uploadClone(t, srv, ownerCookie, "admin-delete.wav", []byte("admin-reference"))
+
+	rec := adminAction(t, srv, adminCookie, http.MethodDelete,
+		"/admin/voices/"+strconv.FormatInt(voiceID, 10), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin delete status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if _, err := srv.voices.Get(context.Background(), voiceID); !errors.Is(err, voices.ErrNotFound) {
+		t.Fatalf("Get after admin delete error = %v, want ErrNotFound", err)
 	}
 }
 

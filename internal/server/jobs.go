@@ -45,7 +45,7 @@ func (s *Server) handleStudio(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, err)
 		return
 	}
-	available, err := s.voices.List(r.Context(), userID)
+	available, err := s.voiceCards(r, userID)
 	if err != nil {
 		serverError(w, r, err)
 		return

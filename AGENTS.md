@@ -140,14 +140,24 @@ reference, rendered in itself.
   and returns the same fragment. **Rename is clones-only** — `SeedStock`
   reconciles stock rows *by name*, so a renamed stock row would read as stale on
   the next boot and be deleted, taking every job's voice link with it
-  (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead. All
-  routes are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
+  (`ON DELETE SET NULL`); `Store.Rename` returns `ErrNotRenamable` instead.
+  `DELETE /voices/{id}` is also clones-only: the stable `creator_id` (the
+  original uploader) or a live administrator may delete, while an assignee may
+  not. It deletes the row and all access grants, nulls historical
+  `jobs.voice_id`, removes the reference blob after the transaction commits,
+  and returns the refreshed grid so the card disappears immediately. All routes
+  are auth-gated — only `/login`, `/healthz`, `/static/*` are exempt.
   `Store.ReferenceBytes` reads the blob back for inline base64 submission.
   Cloned cards report transcription readiness from `ReferenceTranscript`:
   non-blank stored text is **Ready**, otherwise **Transcribing...**. Upload and
-  enqueue responses never wait for Whisper; the background worker owns eager and
-  atomic lazy recovery before a Higgs job reaches RunPod. MOSS jobs bypass this
-  transcript gate entirely.
+  enqueue responses never wait for Whisper. After each submission-worker tick,
+  a proactive pass finds durable NULL/blank cloned transcripts and attempts one
+  with the existing lease/backoff rules; this also backfills uploads created
+  before the behavior existed, including cards used only by AuK. Higgs/Breeze
+  submission retains atomic lazy recovery when it reaches a clone first. A
+  pending `VoiceGrid` polls `/voices/grid` every three seconds and stops as soon
+  as all visible cards are ready, so the badge repaints without a page reload.
+  MOSS and AuK jobs themselves bypass the transcript gate entirely.
 - **The AuK prompt assistant is a synchronous, unpersisted LLM proxy scoped to
   one fixed system prompt.** `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL_ID`
   are Infisical secrets exactly like `RUNPOD_API_KEY` — no docker-compose.yml
@@ -210,9 +220,10 @@ reference, rendered in itself.
   applicants could both pass.
 - **The schema is multi-user-aware, and migrations stay additive.** `users`
   carries `role` (`admin|user`) and `status` (`approved|pending|disabled`,
-  defaulting to `pending`) plus an optional `email`; `voices` keeps the nullable
-  `owner_id` column for schema compatibility and carries `is_global`, but access
-  no longer comes from `owner_id`. `voice_assignments(voice_id, user_id)` is the
+  defaulting to `pending`) plus an optional `email`; `voices` keeps nullable
+  `owner_id` as the most-recent-grant compatibility mirror, adds stable
+  `creator_id` for original-uploader delete authority, and carries `is_global`.
+  Access comes from neither owner field. `voice_assignments(voice_id, user_id)` is the
   many-to-many access source, unique per pair with cascading foreign keys;
   visibility is `is_global = 1 OR voice_assignments.user_id = ?` and list queries
   use `DISTINCT` so a global assigned card appears once. `access_requests` holds
@@ -237,7 +248,8 @@ reference, rendered in itself.
   voice rows with `owner_id=NULL`, and then deletes the account.
   Access-request decisions use `auth.AccessRequests`; voice actions use
   `voices.Store.SetGlobal`/`Assign`/`Unassign` (`/admin/voices/{id}/unassign`
-  revokes one user without disturbing the card's other assignments).
+  revokes one user without disturbing the card's other assignments) and
+  `/admin/voices/{id}` lets a live admin permanently delete a cloned card.
   **A private card's access is many-to-many, not single-owner** —
   `voice_assignments` can (and routinely does) hold several rows for the same
   card. `server.(*Server).adminVoices` reflects that: it joins

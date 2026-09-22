@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS voices (
 	reference_path       TEXT,
 	created_at           TEXT    NOT NULL DEFAULT (datetime('now')),
 	owner_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	creator_id           INTEGER REFERENCES users(id) ON DELETE SET NULL,
 	is_global            INTEGER NOT NULL DEFAULT 0,
 	reference_transcript TEXT
 );
@@ -191,14 +192,31 @@ func Migrate(ctx context.Context, handle *sql.DB) error {
 		`UPDATE users SET role = 'admin', status = 'approved' WHERE id = (SELECT MIN(id) FROM users)`); err != nil {
 		return fmt.Errorf("migrate: restore bootstrap admin: %w", err)
 	}
-	// voices gains ownership. owner_id is the account that cloned the card and
-	// stays nullable: stock cards have no owner, and deleting an account must
-	// orphan its cards rather than destroy them, hence ON DELETE SET NULL. With
-	// is_global alongside it, visibility is `owner_id = ? OR is_global = 1` —
-	// answerable from the voices row alone, no join.
+	// owner_id remains a legacy mirror of the most recent access grant. It is
+	// nullable because stock cards have no owner and account deletion must orphan
+	// cards rather than destroy them.
 	if err := addColumnIfMissing(ctx, handle, "voices", "owner_id",
 		"INTEGER REFERENCES users(id) ON DELETE SET NULL"); err != nil {
 		return fmt.Errorf("migrate: add voices.owner_id: %w", err)
+	}
+	// creator_id is stable delete authority for cloned cards. owner_id cannot fill
+	// that role because Assign rewrites it whenever an admin grants access. Legacy
+	// rows get the best attribution available exactly once; repeating this update
+	// would transfer authorship after a creator account is deleted.
+	hadCreatorID, err := columnExists(ctx, handle, "voices", "creator_id")
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, handle, "voices", "creator_id",
+		"INTEGER REFERENCES users(id) ON DELETE SET NULL"); err != nil {
+		return fmt.Errorf("migrate: add voices.creator_id: %w", err)
+	}
+	if !hadCreatorID {
+		if _, err := handle.ExecContext(ctx, `
+			UPDATE voices SET creator_id = owner_id
+			WHERE kind = 'cloned' AND creator_id IS NULL`); err != nil {
+			return fmt.Errorf("migrate: backfill voices.creator_id: %w", err)
+		}
 	}
 	hadIsGlobal, err := columnExists(ctx, handle, "voices", "is_global")
 	if err != nil {

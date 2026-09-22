@@ -896,6 +896,79 @@ func TestHiggsJobLazyRecoverySucceeds(t *testing.T) {
 	}
 }
 
+func TestProactiveTranscriptionRunsWithoutAJob(t *testing.T) {
+	h := newHarness(t)
+	whisper := &fakeWhisper{text: "  Automatically transcribed.  "}
+	w := h.worker(&fakeSubmitter{}, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+
+	w.Tick(context.Background())
+
+	voice, err := h.voices.Get(context.Background(), h.cloneID)
+	if err != nil {
+		t.Fatalf("Get voice: %v", err)
+	}
+	if !voice.ReferenceTranscript.Valid || voice.ReferenceTranscript.V != "Automatically transcribed." {
+		t.Fatalf("ReferenceTranscript = %+v, want proactive transcript", voice.ReferenceTranscript)
+	}
+	if whisper.callCount() != 1 {
+		t.Fatalf("whisper calls = %d, want 1", whisper.callCount())
+	}
+}
+
+func TestProactiveTranscriptionSkipsLeasedVoice(t *testing.T) {
+	h := newHarness(t)
+	secondID, err := h.voices.CreateCloned(context.Background(), h.userID, "Second", ".wav", []byte("DEF"))
+	if err != nil {
+		t.Fatalf("CreateCloned second: %v", err)
+	}
+	whisper := &fakeWhisper{text: "Second transcript."}
+	w := h.worker(&fakeSubmitter{}, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+	if !w.claimTranscription(h.cloneID) {
+		t.Fatal("failed to lease first pending voice")
+	}
+
+	w.Tick(context.Background())
+
+	first, err := h.voices.Get(context.Background(), h.cloneID)
+	if err != nil {
+		t.Fatalf("Get first: %v", err)
+	}
+	if first.ReferenceTranscript.Valid {
+		t.Fatalf("leased first voice was transcribed: %+v", first.ReferenceTranscript)
+	}
+	second, err := h.voices.Get(context.Background(), secondID)
+	if err != nil {
+		t.Fatalf("Get second: %v", err)
+	}
+	if !second.ReferenceTranscript.Valid || second.ReferenceTranscript.V != "Second transcript." {
+		t.Fatalf("second transcript = %+v, want completed", second.ReferenceTranscript)
+	}
+}
+
+func TestProactiveTranscriptionFailureDoesNotBlockJobSubmission(t *testing.T) {
+	h := newHarness(t)
+	jobID := h.enqueue(t, h.stockID, "queue keeps moving")
+	client := &fakeSubmitter{id: "runpod-still-submitted"}
+	whisper := &fakeWhisper{err: errors.New("whisper unavailable")}
+	w := h.worker(client, 1,
+		WithWhisperClient(whisper), WithProactiveTranscription(true))
+
+	w.Tick(context.Background())
+
+	job := h.get(t, jobID)
+	if job.Status != jobs.StatusSubmitted {
+		t.Fatalf("job status = %q, want submitted (err=%q)", job.Status, job.Error)
+	}
+	if len(client.inputs) != 1 {
+		t.Fatalf("submitted inputs = %d, want 1", len(client.inputs))
+	}
+	if whisper.callCount() != 1 {
+		t.Fatalf("whisper calls = %d, want 1", whisper.callCount())
+	}
+}
+
 // A failed lazy recovery must fail the job outright rather than spend a
 // RunPod credit on a job Higgs cannot clone the voice for.
 func TestHiggsJobLazyRecoveryFailureFailsJobWithoutSubmitting(t *testing.T) {

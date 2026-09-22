@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/sruckh/timbre/internal/auth"
+	"github.com/sruckh/timbre/internal/voices"
 )
 
 // AdminUser is the account summary shown in the management table.
@@ -317,6 +318,17 @@ templ adminVoices(cards []AdminVoice, users []AdminUser) {
 											</select>
 											<button type="submit" class="btn btn--quiet btn--sm">Add access</button>
 										</form>
+									}
+									if card.Kind == voices.KindCloned {
+										<button
+											type="button"
+											class="btn btn--quiet btn--sm text-burnt"
+											hx-delete={ adminPath("voices", card.ID, "") }
+											hx-target="#admin-panel"
+											hx-swap="outerHTML"
+											hx-confirm={ "Delete " + card.Name + " and its reference audio? This cannot be undone." }
+											aria-label={ "Delete " + card.Name }
+										>Delete</button>
 									}
 								</div>
 							</td>

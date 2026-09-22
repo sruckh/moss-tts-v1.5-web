@@ -56,7 +56,7 @@ func sampleJobs() []jobs.Job {
 func sampleVoices() []voices.Voice {
 	return []voices.Voice{
 		{ID: 1, Kind: voices.KindStock, Name: "Moss", Model: "MOSS-TTS v1.5", LicenseLabel: "OpenMOSS Community"},
-		{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", LicenseLabel: "Cloned voice"},
+		{ID: 4, Kind: voices.KindCloned, Name: "Marrow", Model: "Cloned", LicenseLabel: "Cloned voice", CanDelete: true},
 	}
 }
 
@@ -259,6 +259,8 @@ func TestVoiceCardControls(t *testing.T) {
 		`hx-post="/voices/4/name"`,
 		`src="/voices/4/reference"`,
 		`aria-label="Rename Marrow"`,
+		`hx-delete="/voices/4"`,
+		`aria-label="Delete Marrow"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("cloned card missing %q", want)
@@ -270,9 +272,42 @@ func TestVoiceCardControls(t *testing.T) {
 	if strings.Contains(html, `src="/voices/1/reference"`) {
 		t.Error("stock card offers a reference preview it does not have")
 	}
+	if strings.Contains(html, `hx-delete="/voices/1"`) {
+		t.Error("stock card offers deletion")
+	}
+	withoutAuthority := []voices.Voice{{ID: 5, Kind: voices.KindCloned, Name: "Shared", Model: "Cloned"}}
+	if got := render(t, VoiceGrid(withoutAuthority, 5)); strings.Contains(got, `hx-delete="/voices/5"`) {
+		t.Error("assigned non-owner card offers deletion")
+	}
 	// A card holds buttons now, so it may not be one itself.
 	if strings.Contains(html, `<button type="button" aria-pressed=`) {
 		t.Error("the voice card is still a button and now nests buttons")
+	}
+}
+
+func TestVoiceGridSwapReconcilesDeletedSelection(t *testing.T) {
+	html := render(t, Studio(sampleJobs(), sampleVoices(), nil, 0))
+	for _, want := range []string{
+		"function timbrePaintVoice()",
+		"cards.find(function (card) { return card.dataset.voiceId === vid.value; })",
+		"timbrePaintVoice();",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("studio selection reconciliation missing %q", want)
+		}
+	}
+}
+
+func TestAdminVoiceDeleteControlIsClonedOnly(t *testing.T) {
+	html := render(t, AdminPanel(AdminData{Voices: []AdminVoice{
+		{ID: 1, Kind: voices.KindStock, Name: "Moss"},
+		{ID: 2, Kind: voices.KindCloned, Name: "Disposable"},
+	}}))
+	if !strings.Contains(html, `hx-delete="/admin/voices/2"`) {
+		t.Error("admin clone row is missing delete control")
+	}
+	if strings.Contains(html, `hx-delete="/admin/voices/1"`) {
+		t.Error("admin stock row offers deletion")
 	}
 }
 
@@ -290,6 +325,16 @@ func TestVoiceCardTranscriptionReadiness(t *testing.T) {
 	}
 	if got := strings.Count(html, ">Ready</span>"); got != 1 {
 		t.Errorf("Ready transcription badge count = %d, want 1", got)
+	}
+	for _, want := range []string{`hx-get="/voices/grid"`, `hx-trigger="every 3s"`, `hx-swap="outerHTML show:none"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("pending grid missing %q", want)
+		}
+	}
+
+	readyHTML := render(t, VoiceGrid([]voices.Voice{items[0], items[3]}, 4))
+	if strings.Contains(readyHTML, `hx-get="/voices/grid"`) {
+		t.Error("fully ready grid keeps polling")
 	}
 	if !strings.Contains(html, "focus:ring-2") {
 		t.Error("voice cards lost their keyboard focus ring")

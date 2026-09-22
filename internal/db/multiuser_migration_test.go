@@ -101,6 +101,7 @@ func TestMigrateAddsMultiUserColumns(t *testing.T) {
 		{"users", "status", "TEXT", 1, "'pending'"},
 		{"users", "email", "TEXT", 0, ""},
 		{"voices", "owner_id", "INTEGER", 0, ""},
+		{"voices", "creator_id", "INTEGER", 0, ""},
 		{"voices", "is_global", "INTEGER", 1, "0"},
 	}
 
@@ -120,6 +121,51 @@ func TestMigrateAddsMultiUserColumns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMigrateBackfillsCreatorOnlyWhenColumnIsIntroduced(t *testing.T) {
+	ctx := context.Background()
+	handle := openPreMultiUserDB(t)
+	if _, err := handle.ExecContext(ctx,
+		`ALTER TABLE voices ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL`); err != nil {
+		t.Fatalf("add legacy owner_id: %v", err)
+	}
+	if _, err := handle.ExecContext(ctx,
+		`INSERT INTO users (id, username, password_hash) VALUES (1, 'creator', 'x')`); err != nil {
+		t.Fatalf("insert creator: %v", err)
+	}
+	if _, err := handle.ExecContext(ctx,
+		`INSERT INTO voices (id, kind, name, owner_id) VALUES (1, 'cloned', 'Legacy clone', 1)`); err != nil {
+		t.Fatalf("insert legacy voice: %v", err)
+	}
+	if err := Migrate(ctx, handle); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	var creatorID sql.Null[int64]
+	if err := handle.QueryRowContext(ctx,
+		`SELECT creator_id FROM voices WHERE id = 1`).Scan(&creatorID); err != nil {
+		t.Fatalf("read creator_id: %v", err)
+	}
+	if !creatorID.Valid || creatorID.V != 1 {
+		t.Fatalf("creator_id = %+v, want 1", creatorID)
+	}
+
+	// Once creator_id exists, NULL is durable. A later assignment mirror must not
+	// silently become the creator on the next migration pass.
+	if _, err := handle.ExecContext(ctx,
+		`UPDATE voices SET creator_id = NULL, owner_id = 1 WHERE id = 1`); err != nil {
+		t.Fatalf("clear creator_id: %v", err)
+	}
+	if err := Migrate(ctx, handle); err != nil {
+		t.Fatalf("Migrate second pass: %v", err)
+	}
+	if err := handle.QueryRowContext(ctx,
+		`SELECT creator_id FROM voices WHERE id = 1`).Scan(&creatorID); err != nil {
+		t.Fatalf("read creator_id after second pass: %v", err)
+	}
+	if creatorID.Valid {
+		t.Fatalf("creator_id = %d after second pass, want NULL", creatorID.V)
 	}
 }
 
@@ -284,19 +330,23 @@ func TestDeletingOwnerOrphansVoiceRatherThanDeletingIt(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 	if _, err := handle.ExecContext(ctx,
-		`INSERT INTO voices (id, kind, name, owner_id) VALUES (1, 'cloned', 'Clara', 1)`); err != nil {
+		`INSERT INTO voices (id, kind, name, owner_id, creator_id) VALUES (1, 'cloned', 'Clara', 1, 1)`); err != nil {
 		t.Fatalf("insert voice: %v", err)
 	}
 	if _, err := handle.ExecContext(ctx, `DELETE FROM users WHERE id = 1`); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 
-	var owner sql.Null[int64]
-	if err := handle.QueryRowContext(ctx, `SELECT owner_id FROM voices WHERE id = 1`).Scan(&owner); err != nil {
+	var owner, creator sql.Null[int64]
+	if err := handle.QueryRowContext(ctx,
+		`SELECT owner_id, creator_id FROM voices WHERE id = 1`).Scan(&owner, &creator); err != nil {
 		t.Fatalf("the voice went with its owner: %v", err)
 	}
 	if owner.Valid {
 		t.Errorf("owner_id = %d after the owner was deleted, want NULL", owner.V)
+	}
+	if creator.Valid {
+		t.Errorf("creator_id = %d after the creator was deleted, want NULL", creator.V)
 	}
 }
 

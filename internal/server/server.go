@@ -108,10 +108,13 @@ func (s *Server) routes() {
 		r.Post("/voices/{id}/global", s.handleAdminVoiceGlobal)
 		r.Post("/voices/{id}/owner", s.handleAdminVoiceOwner)
 		r.Post("/voices/{id}/unassign", s.handleAdminVoiceUnassign)
+		r.Delete("/voices/{id}", s.handleAdminVoiceDelete)
 	})
 	s.router.Get("/voices", s.handleVoiceLibrary)
+	s.router.Get("/voices/grid", s.handleVoiceGrid)
 	s.router.Post("/voices/upload", s.handleVoiceUpload)
 	s.router.Post("/voices/{id}/name", s.handleVoiceRename)
+	s.router.Delete("/voices/{id}", s.handleVoiceDelete)
 	// Session-gated preview of a stored reference clip. It is not a public URL
 	// and RunPod never sees it: submission still carries the bytes base64-inline.
 	s.router.Get("/voices/{id}/reference", s.handleVoiceReference)

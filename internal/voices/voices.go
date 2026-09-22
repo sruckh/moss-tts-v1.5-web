@@ -50,9 +50,11 @@ var ErrNoReference = errors.New("voice has no reference audio")
 // Rename validation failures. The handler maps each to a 400 with the error
 // text, so the messages are user-facing.
 var (
-	ErrEmptyName    = errors.New("give the voice a name")
-	ErrNameTooLong  = fmt.Errorf("voice name is longer than %d characters", MaxNameLen)
-	ErrNotRenamable = errors.New("stock voices keep their given name")
+	ErrEmptyName       = errors.New("give the voice a name")
+	ErrNameTooLong     = fmt.Errorf("voice name is longer than %d characters", MaxNameLen)
+	ErrNotRenamable    = errors.New("stock voices keep their given name")
+	ErrDeleteForbidden = errors.New("only the voice creator or an administrator can delete it")
+	ErrNotDeletable    = errors.New("stock voices cannot be deleted")
 )
 
 // MaxNameLen bounds a voice name. A card shows the name on one display line;
@@ -70,7 +72,9 @@ type Voice struct {
 	ReferenceTranscript sql.Null[string] `json:"reference_transcript"`
 	CreatedAt           string           `json:"created_at"`
 	OwnerID             sql.Null[int64]  `json:"owner_id"`
+	CreatorID           sql.Null[int64]  `json:"creator_id"`
 	IsGlobal            bool             `json:"is_global"`
+	CanDelete           bool             `json:"can_delete,omitempty"`
 }
 
 // Store is the voice-library data access object. It owns both the voices table
@@ -92,7 +96,7 @@ func NewStore(db *sql.DB, audioDir string) *Store {
 func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT v.id, v.kind, v.name, v.model, v.license_label,
-			v.reference_path, v.created_at, v.owner_id, v.is_global, v.reference_transcript
+			v.reference_path, v.created_at, v.owner_id, v.creator_id, v.is_global, v.reference_transcript
 		FROM voices v
 		LEFT JOIN voice_assignments va ON va.voice_id = v.id
 		WHERE v.is_global = 1 OR va.user_id = ?
@@ -110,7 +114,7 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 			isGlobal int
 		)
 		if err := rows.Scan(&v.ID, &v.Kind, &v.Name, &v.Model,
-			&v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal, &v.ReferenceTranscript); err != nil {
+			&v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &v.CreatorID, &isGlobal, &v.ReferenceTranscript); err != nil {
 			return nil, fmt.Errorf("voices scan: %w", err)
 		}
 		v.ReferencePath = ref.V
@@ -118,6 +122,41 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Voice, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// PendingTranscriptionIDs returns cloned voices whose stored reference has not
+// produced a non-blank transcript yet. Durable database state is the queue, so
+// existing rows are recovered automatically after restarts or Whisper outages.
+func (s *Store) PendingTranscriptionIDs(ctx context.Context, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id
+		FROM voices
+		WHERE kind = 'cloned'
+			AND reference_path IS NOT NULL
+			AND TRIM(reference_path) <> ''
+			AND (reference_transcript IS NULL OR TRIM(reference_transcript) = '')
+		ORDER BY created_at, id
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending voice transcriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list pending voice transcriptions: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending voice transcriptions: %w", err)
+	}
+	return ids, nil
 }
 
 // CreateCloned stores the reference audio, inserts a kind='cloned' row, and
@@ -142,8 +181,8 @@ func (s *Store) CreateCloned(ctx context.Context, userID int64, name, ext string
 		ownerArg = userID
 	}
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO voices (kind, name, model, license_label, reference_path, owner_id, is_global)
-		VALUES ('cloned', ?, 'Cloned', 'Cloned voice', ?, ?, 0)`, name, rel, ownerArg)
+		INSERT INTO voices (kind, name, model, license_label, reference_path, owner_id, creator_id, is_global)
+		VALUES ('cloned', ?, 'Cloned', 'Cloned voice', ?, ?, ?, 0)`, name, rel, ownerArg, ownerArg)
 	if err != nil {
 		cleanup()
 		return 0, fmt.Errorf("insert cloned voice: %w", err)
@@ -253,9 +292,9 @@ func (s *Store) Get(ctx context.Context, id int64) (Voice, error) {
 		isGlobal int
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, name, model, license_label, reference_path, created_at, owner_id, is_global, reference_transcript
+		SELECT id, kind, name, model, license_label, reference_path, created_at, owner_id, creator_id, is_global, reference_transcript
 		FROM voices WHERE id = ?`, id).
-		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &isGlobal, &v.ReferenceTranscript)
+		Scan(&v.ID, &v.Kind, &v.Name, &v.Model, &v.LicenseLabel, &ref, &v.CreatedAt, &v.OwnerID, &v.CreatorID, &isGlobal, &v.ReferenceTranscript)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Voice{}, ErrNotFound
 	}
@@ -429,6 +468,61 @@ func (s *Store) Unassign(ctx context.Context, id int64, userID int64) error {
 // honest; silently losing history on the next restart is not.
 //
 // Validation mirrors Enqueue's — user-facing errors, never a silent truncation.
+// Delete removes a cloned voice when actorID is its stable creator or the actor
+// is an administrator. Access grants are removed and historical jobs keep their
+// records with a NULL voice_id. The returned absolute reference path is removed
+// by the HTTP layer only after this transaction commits.
+func (s *Store) Delete(ctx context.Context, id, actorID int64, isAdmin bool) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("delete voice %d: begin: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	var kind string
+	var ref sql.Null[string]
+	var creatorID sql.Null[int64]
+	if err := tx.QueryRowContext(ctx, `
+		SELECT kind, reference_path, creator_id FROM voices WHERE id = ?`, id).
+		Scan(&kind, &ref, &creatorID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("delete voice %d: load: %w", id, err)
+	}
+	if kind != KindCloned {
+		return "", ErrNotDeletable
+	}
+	if !isAdmin && (!creatorID.Valid || creatorID.V != actorID) {
+		return "", ErrDeleteForbidden
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET voice_id = NULL WHERE voice_id = ?`, id); err != nil {
+		return "", fmt.Errorf("delete voice %d: jobs: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM voice_assignments WHERE voice_id = ?`, id); err != nil {
+		return "", fmt.Errorf("delete voice %d: assignments: %w", id, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM voices WHERE id = ?`, id)
+	if err != nil {
+		return "", fmt.Errorf("delete voice %d: row: %w", id, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("delete voice %d: row: %w", id, err)
+	}
+	if affected == 0 {
+		return "", ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("delete voice %d: commit: %w", id, err)
+	}
+	if !ref.Valid || ref.V == "" {
+		return "", nil
+	}
+	return s.absPath(ref.V), nil
+}
+
 func (s *Store) Rename(ctx context.Context, id int64, name string) error {
 	name = strings.TrimSpace(name)
 	switch {
