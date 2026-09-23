@@ -148,6 +148,34 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // even when the endpoint is wedged.
 const runPodHealthTimeout = 5 * time.Second
 
+// runpodStatus is one engine's health block inside the /health response.
+type runpodStatus struct {
+	Configured bool           `json:"configured"`
+	Reachable  bool           `json:"reachable"`
+	Error      string         `json:"error,omitempty"`
+	Detail     *runpod.Health `json:"detail,omitempty"`
+}
+
+// probeHealth fills one engine's health block: a configured check, a probe
+// with a bounded timeout, and the recorded error when the probe fails. probe
+// is only invoked when configured is true.
+func (s *Server) probeHealth(ctx context.Context, configured bool, notConfigured string, probe func(context.Context) (runpod.Health, error)) runpodStatus {
+	if !configured {
+		return runpodStatus{Error: notConfigured}
+	}
+	st := runpodStatus{Configured: true}
+	cctx, cancel := context.WithTimeout(ctx, runPodHealthTimeout)
+	health, err := probe(cctx)
+	cancel()
+	if err != nil {
+		st.Error = err.Error()
+	} else {
+		st.Reachable = true
+		st.Detail = &health
+	}
+	return st
+}
+
 // handleRunPodHealth answers GET /health: the app plus a probe of the RunPod
 // endpoint's worker pool and queue depth.
 //
@@ -157,47 +185,16 @@ const runPodHealthTimeout = 5 * time.Second
 // perfectly healthy app. This route is the operator-facing view, and it costs
 // an upstream call, so it needs a login.
 func (s *Server) handleRunPodHealth(w http.ResponseWriter, r *http.Request) {
-	type runpodStatus struct {
-		Configured bool           `json:"configured"`
-		Reachable  bool           `json:"reachable"`
-		Error      string         `json:"error,omitempty"`
-		Detail     *runpod.Health `json:"detail,omitempty"`
-	}
 	body := struct {
 		OK     bool         `json:"ok"`
 		RunPod runpodStatus `json:"runpod"`
 		AuK    runpodStatus `json:"auk"`
 	}{OK: true}
 
-	body.RunPod.Configured = s.runpod != nil && s.runpod.Configured()
-	if !body.RunPod.Configured {
-		body.RunPod.Error = "RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured"
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), runPodHealthTimeout)
-		health, err := s.runpod.Health(ctx)
-		cancel()
-		if err != nil {
-			body.RunPod.Error = err.Error()
-		} else {
-			body.RunPod.Reachable = true
-			body.RunPod.Detail = &health
-		}
-	}
-
-	body.AuK.Configured = s.runpod != nil && s.runpod.AuKConfigured()
-	if !body.AuK.Configured {
-		body.AuK.Error = "AUK_RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured"
-	} else {
-		ctx, cancel := context.WithTimeout(r.Context(), runPodHealthTimeout)
-		health, err := s.runpod.HealthAuK(ctx)
-		cancel()
-		if err != nil {
-			body.AuK.Error = err.Error()
-		} else {
-			body.AuK.Reachable = true
-			body.AuK.Detail = &health
-		}
-	}
+	body.RunPod = s.probeHealth(r.Context(), s.runpod != nil && s.runpod.Configured(),
+		"RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured", s.runpod.Health)
+	body.AuK = s.probeHealth(r.Context(), s.runpod != nil && s.runpod.AuKConfigured(),
+		"AUK_RUNPOD_ENDPOINT or RUNPOD_API_KEY is not configured", s.runpod.HealthAuK)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
